@@ -25,7 +25,8 @@ e2-micro VM** (use `code --ci`, i.e. GitHub Actions).
    - FreeLLMAPI (laptop, docker, 127.0.0.1:3001; it autostarts because docker is enabled and the
      container has `restart: unless-stopped`) only has a Google key. The owner must add provider keys
      (Mistral, NVIDIA NIM, Zhipu/GLM, DeepSeek, OpenRouter) in its dashboard.
-   - Then run: `./opencode-router-test/run.sh`.
+   - Owner decision (2026-10-31): no keys will be added, so this test is skipped via FreeLLMAPI.
+     Rerun `./opencode-router-test/run.sh` only if keys or another free provider appear.
 2. Local quantized model as router.
    - llama.cpp b12017 CPU is at `~/opt/llama/dl/llama-b12017/`.
    - The model is `~/opt/llama/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` (unsloth, HF).
