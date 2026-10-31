@@ -1,4 +1,4 @@
-# Lunobot on Haiku + Gemini offload: status and handoff (2026-10-31, ~20:50 UTC)
+# Lunobot on Haiku + Gemini offload: status and handoff (2026-10-31, ~21:40 UTC)
 
 Owner's goal: run Lunobot (unxed/lunobot) as **Claude Code subagents inside the owner's session** (not
 separate runner processes), each on Claude Haiku, offloading ALL substantive work to Gemini (AI Studio
@@ -41,13 +41,19 @@ full debug info. Goal now is to polish Haiku + offload, not throughput.**
 | untracked `-p` dir silently not packed; quota on whole chain -> exit after 11 min | c6c476b |
 | manager gate blocked relative redirects into the work dir (no debug log written) | 0969655 |
 
-## In progress
-- Sonnet subagent (fresh clone /tmp/claude-1000/aifix2): `code` false success (file unchanged x2), malformed JSON
-  from 3.8-flash, line numbers in packed files for exact refs, optional `--verify-refs`.
+- goWidgets#43 triage: unxed/lunobot 24da9a4 (Gemini rated it; row written by tools/triage_touch.py because both
+  Gemini patches glued the row to the last line of a file without trailing newline -> fixed in ap).
+- account-216 state line fixed fully autonomously via aistudio code (7 s, 1 file changed, no DIAG): 938dacf.
 
-## Queue
-1. goWidgets triage (after the fixes above land).
-2. Fix OWNER_QUEUE account-216 state line.
+| Problem | Fix |
+|---|---|
+| `code` "success" with unchanged file; error chunk broke JSON; wrong file:line refs | 4b1fd23 (PATCH_NOOP, robust stream parse, line-numbered ask, --verify-refs) |
+| ap INSERT_AFTER at EOF without newline glued lines | unxed/ap 3c461fc, vendored in unxed/AI ac18f43 (+ gate resolves tee targets) |
+
+## Open / next
+- All queued retries are done. Minor: `tools/claims.py keys` crashes (traceback); `aistudio code` prints the whole
+  edited block to stdout (noise); account-216 Progress line left as is.
+- Next step for the owner: return to the regular loop (one round, 15 min pause) with one or two workers.
 
 ## How to continue (another agent)
 - Skills installed from `~/dev/AI` (`~/.local/bin/aistudio`, `~/.claude/skills/*-offload`, `~/.claude/agents`).
