@@ -66,7 +66,7 @@ if [ "$mem_kb" -lt 2000000 ] && [ "$swap_kb" -lt 1000000 ]; then
 fi
 echo "Installed. Next: aistudio login   (then: aistudio ask 'hello')"
 
-# Claude Code subagents (router + manager). Claude Code loads agent types only at session start:
+# Claude Code subagents (routers). Claude Code loads agent types only at session start:
 # restart the session after installing, or `subagent_type` is not found and no gate is attached.
 if [ -d "$HOME/.claude" ]; then
   mkdir -p "$HOME/.claude/agents"

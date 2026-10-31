@@ -49,6 +49,24 @@ that commit are awaited; failed-step logs go back to the model. Needs `gh auth l
 mistral-chat code --task-file task.md -C ~/repo --ci --ci-branch fix/issue-42
 ```
 
+## Drive mode: the model runs the whole task
+
+`mistral-chat drive --task-file T.md [-f file ...] [-C workdir] [-m model] [--max-steps 80] [--step-timeout 600] [--deadline-min 50] [--log DIR]`
+
+Mistral does ALL the thinking, including reading the instructions in the attached files. The router only launches
+this one command and relays its stdout. Each turn Mistral answers with exactly ONE fenced JSON action:
+`{"run": "<shell cmd>", "why": ".."}`, `{"code": {"task","dir","paths","test"}}` (the engine's own `code` flow with ap
+patches), `{"write": {"path","content"}}` (only inside the workdir or /tmp/**/work/), `{"done": ".."}`,
+`{"blocked": ".."}`. The ENGINE executes it (cwd = workdir, per-step timeout) and returns exit code + stdout/stderr
+(each clipped to ~20k chars, head+tail). The transcript is resent every turn; older outputs are shortened first to stay
+under the context limit, the task/protocol/files never.
+Hard refusals (returned to the model as the step result): `rm -rf` outside workdir or /tmp/**/work, `git push
+--force/-f/--force-with-lease`, `git reset --hard` on main/master of a repo with a remote, `~/.ssh`,
+`~/.offload-browser` cookies/profile, `~/.config/gh`, env/token dumps, `sudo`, `curl | sh`.
+Log: `<log>/drive.jsonl` + `drive.md`; progress on stderr; `status --runs` shows the run. Exit: 0 done, 4 blocked,
+5 max-steps/deadline, 3 context too large, other non-zero = model failure (DIAG line). With `-m auto` drive uses the
+hard-tier model for every step. Router agents: `agents/claude/drive-router.md`, `agents/opencode/drive-router.md`.
+
 ## Vendor chain (hard rule)
 
 A vendor never offloads to itself, directly or anywhere up a chain. Every call needs
@@ -64,15 +82,11 @@ on stderr: pass it to any sub-task you derive from the answer.
 `mistral-chat guard`, install to `~/.claude/agents/`) and `agents/opencode/mistral-router.md`
 (bash allowed only for `mistral-chat …`).
 
-## Manager gate, context size, diagnostics
+## Offload modes, context size, diagnostics
 
 - **Web UI only (hard rule)**: Le Chat (chat.mistral.ai) is reached only through the browser UI driven over CDP. Never add or use an API path; never use its API, API keys or SDKs.
-- **The main agent never does the work itself** when offloading: no code, analysis, triage, texts or markdown
-  edits of its own. Write a task file and hand it to the router subagent.
-- **Manager gate**: make a small orchestrator model unable to cheat with the PreToolUse hook `mistral-chat guard --manager`
-  (blocks Edit/MultiEdit/NotebookEdit, Write except `task*.md`/`*.task.md`/`tasks/`, and inline code or file writes in
-  Bash: `python3 -c`, heredocs, `sed -i`, `perl -e/-i`, `tee`, `> file`, `git apply`/`patch`/`ap`, `gh --body "..."`):
-  `claude -p --settings '{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"mistral-chat guard --manager"}]}]}}'`
+- **Offload modes (hard rule)**: the only supported modes are router-only: `mistral-chat ask|code|batch|drive` launched
+  verbatim by a cheap router that never reads, studies, plans or starts the task itself.
 - **Explicit `-p` paths and quota**: `-p` paths that git does not track are packed from disk (a path matching no files exits 3 naming it; per-path counts in the `context paths:` log line); when every model of the chain fails with quota/rate limit/empty answer, the engine waits `OFFLOAD_QUOTA_WAIT` s (default 120) and makes one more pass.
 - **Context size**: the packed context (+task) is limited to 400000 chars (`--max-context N` on `code`/`ask`, or
   `OFFLOAD_MAX_CONTEXT`). Nothing is ever truncated: over the limit the command exits with code 3 and lists the 15
@@ -86,8 +100,6 @@ on stderr: pass it to any sub-task you derive from the answer.
   - A response stream that is not valid JSON (truncated, or an error chunk such as `[,[7,"The caller does not have permission"]]` appended after the text; live: "Expecting ',' delimiter") is no longer an opaque JSON error: an error chunk becomes `AI Studio error: Permission denied...` (PERMISSION_DENIED/RATE_LIMIT, normal retry/fallback), a cut stream becomes `MALFORMED_RESPONSE` (retried); partial answers are never returned.
   - `mistral-chat ask -f` numbers file lines (`  42| code`, prefix declared as not part of the file) by default so cited `path:line` refs are exact; `--no-line-numbers` disables it. `mistral-chat code` does NOT number by default (ap snippets are matched verbatim); `--line-numbers` opts in and the prompt says never to copy the prefix.
   - `mistral-chat ask --verify-refs DIR` greps every `path:line` in the answer and warns about files/lines that do not exist (existence only, not correctness).
-- **Manager as a subagent**: `agents/claude/offload-manager.md` (`mistral-offload-manager`, Haiku, gated by
-  `mistral-chat guard --manager`) runs the orchestrator inside a Claude Code session instead of a separate `claude -p`.
 - **Agents load at session start**: `install.sh` copies `agents/claude/*.md` to `~/.claude/agents/`; Claude Code
   sees new agent types only in a new session. Without a restart `subagent_type` is "not found" and no gate is
   attached; do not fall back to an ungated general-purpose agent silently, say so.
@@ -178,7 +190,7 @@ the last failure bundles.
 Heartbeat also covers the pauses between attempts and local work: `waiting: state=between, phase=pause before
 attempt 2: retrying in 30s with <model>` (or `running tests: ...`, `waiting for CI`, `triage: ...`).
 
-**Rule for routers and orchestrators: do not wait silently, do not kill by guess.** While the command runs,
+**Rule for routers: do not wait silently, do not kill by guess.** While the command runs,
 heartbeat lines must keep coming (or `mistral-chat status --runs` shows `health=ok`). No heartbeat and no status refresh
 for longer than the stall window (120 s by default) = the run is dead: treat it as failed, report
 `mistral-chat status --runs` plus `mistral-chat diag`, and retry with another `-m` or hand the failure back; never poll the

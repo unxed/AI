@@ -1521,9 +1521,480 @@ def code_dry_run(args, root, rnd, ans, patch, dctx):
     return 0
 
 
+# ---------------------------------------------------------------- drive mode
+# Gemini drives a multi-step task: it answers each turn with ONE JSON action, the ENGINE
+# executes it (never the cheap router model) and feeds the result back.
+
+EXIT_BLOCKED, EXIT_LIMIT = 4, 5
+DRIVE_OUT_LIMIT = 20_000
+DRIVE_SYSTEM = """You are the operator of a multi-step task. You cannot run anything yourself: an engine executes
+the ONE action you answer with and returns the result in the next turn (the TRANSCRIPT below). You think, decide,
+read instructions, run commands, write files and finish; the engine only executes and reports.
+
+Answer with EXACTLY ONE fenced JSON block and nothing else that matters (short reasoning before it is fine):
+
+```json
+{"run": "<one shell command, bash -c, cwd = the workdir>", "why": "<short reason>"}
+```
+or {"code": {"task": "<task text>", "dir": "<repo dir>", "paths": ["<optional relevant paths>"], "test": "<optional test command>"}}
+   (the engine runs its own code flow: you write an `ap` patch which is applied and tested, never a diff),
+or {"write": {"path": "<file>", "content": "<full file content>"}}   (only inside the workdir or /tmp/**/work/),
+or {"done": "<summary of what was done and the result>"}  when the task is complete,
+or {"blocked": "<reason>"}  when it cannot be continued (e.g. needs the owner).
+
+Rules: one action per turn; no interactive commands; each command has a time limit; long output is truncated
+(head and tail kept), so filter it (grep/head/tail). The engine REFUSES and tells you: rm -rf outside the workdir
+or /tmp/**/work, git push --force / -f / --force-with-lease, git reset --hard on main of a remote repo, reading
+~/.ssh, ~/.offload-browser cookies or ~/.config/gh/hosts.yml, dumping env or tokens, sudo, curl|sh style
+fetch-and-execute. A refusal is a normal step result: choose another way. Older step outputs may be shortened.
+"""
+
+_SENSITIVE_RX = (
+    (r"\.ssh\b", "reading ~/.ssh"),
+    (r"\.config/gh\b|\.git-credentials|\.netrc\b", "reading gh/git credentials"),
+    (r"/proc/[^\s/]*/environ", "reading process environments"),
+    (r"cookies-[\w.-]*\.json|\bgh\s+auth\s+(token|status\s+(-t|--show-token))", "reading cookies/tokens"),
+    (r"\$\{?[A-Za-z_]*(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL)[A-Za-z_]*",
+     "expanding a token/secret environment variable"),
+)
+_FETCH_EXEC_RX = (
+    r"\b(curl|wget|fetch)\b[^\n;&]*\|\s*(sudo\s+)?(\S*/)?(ba|z|da|k)?sh\b",
+    r"\b(curl|wget|fetch)\b[^\n;&]*\|\s*(sudo\s+)?(\S*/)?(python[\d.]*|perl|ruby|node|php)\b",
+    r"\b(ba|z|da)?sh\s+<\(\s*(curl|wget)\b",
+    r"\b(source|eval|\.)\s+[\"']?(<\(|\$\()\s*(curl|wget)\b",
+    r"\$\(\s*(curl|wget)\b[^)]*\)[\"']?\s*$",
+)
+_WRAPPERS = {"env", "command", "nohup", "time", "exec", "nice", "ionice", "stdbuf", "setsid", "timeout", "xargs"}
+
+
+def _work_dir_ok(path):
+    import re
+    return bool(re.match(r"^/tmp/(?:.+/)?work(?:/|$)", path))
+
+
+def path_allowed(path, workdir, strict_inside=False):
+    """True if `path` (already absolute) is inside workdir or under /tmp/**/work/."""
+    p = os.path.normpath(path)
+    w = os.path.normpath(workdir)
+    inside = p.startswith(w + os.sep) or (p == w and not strict_inside)
+    return inside or _work_dir_ok(p)
+
+
+def _resolve(target, cwd):
+    """Absolute normalized path of a shell word, or None if it cannot be known ($var, `cmd`)."""
+    if "$" in target or "`" in target:
+        return None
+    t = os.path.expanduser(target)
+    return os.path.normpath(os.path.join(cwd, t))
+
+
+def _git_state(cwd):
+    """(current branch, has remote) of the repo at cwd; ('', False) when not a repo."""
+    def g(*a):
+        try:
+            r = subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True, timeout=10)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            return ""
+    return g("rev-parse", "--abbrev-ref", "HEAD"), bool(g("remote"))
+
+
+def _segments(cmd):
+    import shlex
+    lex = shlex.shlex(cmd.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    toks = list(lex)
+    seg, out = [], []
+    for t in toks:
+        if t and set(t) <= set(";&|()"):
+            if seg:
+                out.append(seg)
+            seg = []
+        else:
+            seg.append(t)
+    if seg:
+        out.append(seg)
+    return out
+
+
+def check_drive_command(cmd, workdir, git_state=_git_state, _depth=0):
+    """Return None if the shell command Gemini asked for may run, else the reason it is refused.
+    Hard safety layer of `drive`, independent of whatever the model decides."""
+    import re
+    if _depth > 3:
+        return "too deeply nested shell strings"
+    for rx, why in _SENSITIVE_RX:
+        if re.search(rx, cmd, re.I):
+            return f"refused: {why}"
+    for m in re.finditer(r"\.offload-browser(/[^\s'\"]*)?", cmd):
+        if not (m.group(1) or "").startswith(("/diag", "/rounds", "/drive", "/run-")):
+            return "refused: ~/.offload-browser holds login cookies (only diag/, rounds/, drive/ may be read)"
+    for rx in _FETCH_EXEC_RX:
+        if re.search(rx, cmd):
+            return "refused: network fetch-and-execute (curl|sh)"
+    if re.search(r"(^|[\s;&|(])sudo\b|(^|[\s;&|(])(doas|su)\s", cmd):
+        return "refused: sudo"
+    try:
+        segs = _segments(cmd)
+    except ValueError as e:
+        return f"refused: unparsable command ({e})"
+    cwd = os.path.normpath(workdir)
+    for argv in segs:
+        argv = list(argv)
+        while argv and ("=" in argv[0] and argv[0].split("=")[0].replace("_", "a").isalnum()):
+            argv = argv[1:]
+        wrapped = False
+        while argv and os.path.basename(argv[0]) in _WRAPPERS:
+            wrapped = True
+            argv = argv[1:]
+            while argv and (argv[0].startswith("-") or ("=" in argv[0] and argv[0].split("=")[0].replace("_", "a").isalnum())
+                            or re.fullmatch(r"\d+[smhd]?", argv[0])):
+                argv = argv[1:]
+        if not argv:
+            if wrapped:
+                return "refused: environment dump (`env` without a command)"
+            continue
+        name, args = os.path.basename(argv[0]), argv[1:]
+        if name in ("sudo", "doas", "su"):
+            return "refused: sudo"
+        if name == "printenv" or (name in ("export", "declare", "typeset") and (not args or args[0] in ("-p", "-x", "-px"))) \
+                or (name == "set" and not args) or (name == "compgen" and "-e" in args):
+            return "refused: environment dump"
+        if name in ("bash", "sh", "zsh", "dash") and "-c" in args:
+            i = args.index("-c")
+            if i + 1 < len(args):
+                why = check_drive_command(args[i + 1], cwd, git_state, _depth + 1)
+                if why:
+                    return why
+            continue
+        if name == "eval":
+            why = check_drive_command(" ".join(args), cwd, git_state, _depth + 1)
+            if why:
+                return why
+            continue
+        if name in ("cd", "pushd") and args:
+            p = _resolve(args[-1], cwd)
+            cwd = p if p else "/\0unknown"
+            continue
+        if name == "rm":
+            flags = [a for a in args if a.startswith("-") and a != "--"]
+            rec = any(a in ("--recursive",) or (not a.startswith("--") and ("r" in a[1:] or "R" in a[1:])) for a in flags)
+            if rec:
+                targets, rest_opts = [], True
+                for a in args:
+                    if rest_opts and a == "--":
+                        rest_opts = False
+                    elif rest_opts and a.startswith("-"):
+                        continue
+                    else:
+                        targets.append(a)
+                for t in targets:
+                    glob = re.search(r"[*?\[]", t)
+                    head = t[:glob.start()] if glob else t
+                    p = _resolve(head or ".", cwd)
+                    if p is None or cwd.startswith("/\0"):
+                        return f"refused: rm -r target {t!r} cannot be verified (variable/unknown directory)"
+                    if glob:
+                        head_dir = p if head.endswith("/") or not head else os.path.dirname(p)
+                        ok = path_allowed(head_dir, workdir)
+                    else:
+                        ok = path_allowed(p, workdir, strict_inside=True)
+                    if not ok:
+                        return f"refused: rm -rf outside the workdir ({workdir}) and /tmp/**/work: {t}"
+            continue
+        if name == "find" and ("-delete" in args or "-exec" in args or "-execdir" in args):
+            roots = []
+            for a in args:
+                if a.startswith("-") or a in ("(", "!"):
+                    break
+                roots.append(a)
+            for r in roots or ["."]:
+                p = _resolve(r, cwd)
+                if p is None or not path_allowed(p, workdir):
+                    return f"refused: find -delete/-exec outside the workdir: {r}"
+            continue
+        if name == "git":
+            a = list(args)
+            while a and a[0].startswith("-"):
+                a = a[2:] if a[0] in ("-C", "-c", "--git-dir", "--work-tree") else a[1:]
+            sub, rest = (a[0] if a else ""), a[1:]
+            if sub == "push":
+                for x in rest:
+                    if x in ("-f", "--force") or x.startswith("--force") or x.startswith("+") \
+                            or (x.startswith("-") and not x.startswith("--") and "f" in x[1:]):
+                        return "refused: git push --force/-f/--force-with-lease"
+            if sub == "reset" and "--hard" in rest:
+                branch, remote = git_state(cwd if not cwd.startswith("/\0") else workdir)
+                if remote and (branch in ("main", "master")
+                               or re.search(r"\b(checkout|switch)\s+(-\w+\s+)*(main|master)\b", cmd)):
+                    return "refused: git reset --hard on main/master of a repo with a remote"
+    return None
+
+
+def clip_output(text, limit=DRIVE_OUT_LIMIT):
+    """Keep head+tail of a long output and say so."""
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    cut = len(text) - 2 * half
+    return f"{text[:half]}\n[... TRUNCATED: {cut:,} of {len(text):,} chars omitted (head and tail kept) ...]\n{text[-half:]}"
+
+
+def parse_drive_action(ans):
+    """-> (action dict, None) or (None, error text). Exactly one fenced JSON block (or a bare JSON object)."""
+    import re
+    blocks = re.findall(r"```(?:json|JSON)?[ \t]*\n(.*?)```", ans, re.S)
+    cands = [b for b in blocks if b.strip().startswith("{")]
+    if not cands:
+        s = ans.strip()
+        if s.startswith("{") and s.endswith("}"):
+            cands = [s]
+    if len(cands) != 1:
+        return None, ("PROTOCOL ERROR: answer with exactly ONE fenced ```json block holding one action "
+                      f"(found {len(cands)}). Nothing was executed.")
+    try:
+        act = json.loads(cands[0])
+    except ValueError as e:
+        return None, f"PROTOCOL ERROR: the JSON block does not parse ({e}). Nothing was executed."
+    keys = [k for k in ("run", "code", "write", "done", "blocked") if k in act]
+    if not isinstance(act, dict) or len(keys) != 1:
+        return None, ("PROTOCOL ERROR: the action must have exactly one of run/code/write/done/blocked "
+                      f"(got {sorted(act) if isinstance(act, dict) else type(act).__name__}). Nothing was executed.")
+    return act, None
+
+
+def _step_text(st, shortened=False):
+    out = st["result"]
+    if shortened:
+        out = out if len(out) <= 400 else out[:200] + "\n[... older output shortened ...]\n" + out[-150:]
+    return f"--- STEP {st['n']}: {st['action']}\nRESULT:\n{out}\n"
+
+
+def build_drive_prompt(task, files_text, steps, limit, max_steps):
+    """System protocol + task + files + transcript. The transcript is shortened (oldest outputs first,
+    then oldest actions) to fit `limit`; the system/task/files parts are never dropped (ContextTooLarge)."""
+    head = f"{DRIVE_SYSTEM}\n=== TASK ===\n{task}\n=== END TASK ===\n"
+    if files_text:
+        head += f"\n{files_text}\n"
+    tail = (f"\nNow answer with the next action (step {len(steps) + 1} of at most {max_steps}) as ONE fenced "
+            "```json block.")
+    fixed = len(head) + len(tail) + 200
+    if fixed > limit:
+        raise ContextTooLarge(fixed, limit, [("<system+task+files>", fixed)], 0)
+    short = 0
+    while True:
+        parts = [_step_text(s, i < short) for i, s in enumerate(steps)]
+        body = "=== TRANSCRIPT SO FAR ===\n" + ("".join(parts) or "(no steps yet)\n") + "=== END TRANSCRIPT ===\n"
+        if len(head) + len(body) + len(tail) <= limit or short > len(steps):
+            break
+        short += 1
+    if len(head) + len(body) + len(tail) > limit:  # outputs alone did not suffice: drop oldest steps to one line
+        keep_from = 0
+        while keep_from < len(steps):
+            lines = "".join(f"--- STEP {s['n']}: {s['action'][:200]} (output dropped)\n" for s in steps[:keep_from + 1])
+            rest = "".join(_step_text(s, True) for s in steps[keep_from + 1:])
+            body = "=== TRANSCRIPT SO FAR ===\n" + lines + rest + "=== END TRANSCRIPT ===\n"
+            keep_from += 1
+            if len(head) + len(body) + len(tail) <= limit:
+                break
+    return head + body + tail
+
+
+def describe_action(act):
+    if "run" in act:
+        return f"run: {act['run']}" + (f"   # {act['why']}" if act.get("why") else "")
+    if "code" in act:
+        c = act["code"] if isinstance(act["code"], dict) else {}
+        return f"code in {c.get('dir', '.')}: {str(c.get('task', ''))[:300]}"
+    if "write" in act:
+        w = act["write"] if isinstance(act["write"], dict) else {}
+        return f"write {w.get('path')} ({len(str(w.get('content', '')))} chars)"
+    return ("done: " if "done" in act else "blocked: ") + str(act.get("done", act.get("blocked")))
+
+
+def shell_exec(cmd, cwd, timeout):
+    """Run `cmd` with bash in `cwd`; returns (exit, stdout, stderr). Kills the whole group on timeout (exit 124)."""
+    import signal
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    p = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        out, err = p.communicate()
+        return 124, out or "", (err or "") + f"\n[killed: step timeout of {timeout}s exceeded]"
+
+
+def code_exec(spec, workdir, model, timeout, logdir, n):
+    """The engine's own `code` flow (ap patches) as a subprocess; returns (exit, stdout, stderr)."""
+    tf = os.path.join(logdir, f"step{n}.task.md")
+    open(tf, "w", encoding="utf-8").write(str(spec.get("task", "")))
+    cmd = [sys.executable, os.path.abspath(sys.argv[0]), "code", "--task-file", tf, "-C", spec["_dir"], "-m", model]
+    if spec.get("test"):
+        cmd += ["-t", str(spec["test"])]
+    if spec.get("paths"):
+        cmd += ["-p", *[str(x) for x in spec["paths"]]]
+    return shell_exec(" ".join(__import__("shlex").quote(c) for c in cmd), workdir, timeout)
+
+
+class DriveLog:
+    def __init__(self, d):
+        self.dir = d
+        os.makedirs(d, exist_ok=True)
+        self.jsonl, self.md = os.path.join(d, "drive.jsonl"), os.path.join(d, "drive.md")
+
+    def header(self, text):
+        with open(self.md, "a", encoding="utf-8") as f:
+            f.write(text)
+
+    def step(self, rec):
+        with open(self.jsonl, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        with open(self.md, "a", encoding="utf-8") as f:
+            f.write(f"## Step {rec['n']} ({rec.get('model') or '?'}, prompt {rec['prompt_chars']} chars, "
+                    f"{rec['duration_s']}s, exit {rec.get('exit')})\n\n**Action:** {rec['action']}\n\n"
+                    f"```\n{rec['output']}\n```\n\n")
+
+
+def drive_loop(task, files_text, workdir, ask, model, max_steps=80, step_timeout=600, deadline_min=50,
+               logdir=None, limit=None, clock=time.time, runner=shell_exec, coder=code_exec,
+               git_state=_git_state, notify=lambda s: None):
+    """The drive loop. `ask(prompt, model) -> (text, model_used)` raises on a failed model call.
+    Returns (exit code, result text, steps done)."""
+    limit = limit or max_context()
+    workdir = os.path.abspath(workdir)
+    dl = DriveLog(logdir or os.path.join(HOME, "drive", RUN_ID))
+    dl.header(f"# drive run {time.strftime('%Y-%m-%d %H:%M:%S')}\n\nworkdir: {workdir}\nmodel: {model}\n\n"
+              f"## Task\n\n{task[:3000]}\n\n")
+    t0 = clock()
+    deadline = t0 + deadline_min * 60
+    steps, errors = [], 0
+    for n in range(1, max_steps + 1):
+        if clock() >= deadline:
+            return EXIT_LIMIT, f"deadline of {deadline_min} min reached after {len(steps)} steps", len(steps)
+        prompt = build_drive_prompt(task, files_text, steps, limit, max_steps)
+        notify(f"drive step {n}/{max_steps}: asking {model} ({len(prompt)} chars)")
+        ts = clock()
+        ans, used = ask(prompt, model)
+        act, err = parse_drive_action(ans)
+        rec = {"n": n, "time": time.strftime("%Y-%m-%dT%H:%M:%S"), "prompt_chars": len(prompt), "model": used,
+               "answer_chars": len(ans)}
+        if err:
+            errors += 1
+            rec.update(action="(invalid answer)", exit=None, output=err)
+            steps.append({"n": n, "action": "(invalid answer)", "result": err})
+            rec["duration_s"] = round(clock() - ts, 1)
+            dl.step(rec)
+            if errors >= 5:
+                return EXIT_BLOCKED, "the model gave 5 protocol-invalid answers in a row", len(steps)
+            continue
+        errors = 0
+        desc = describe_action(act)
+        rec["action"] = desc
+        if "done" in act or "blocked" in act:
+            rec.update(exit=None, output="", duration_s=round(clock() - ts, 1))
+            dl.step(rec)
+            if "done" in act:
+                return 0, str(act["done"]), n
+            return EXIT_BLOCKED, str(act["blocked"]), n
+        remaining = max(1, int(deadline - clock()))
+        tmo = min(step_timeout, remaining)
+        code, out, errout, refused = None, "", "", None
+        if "run" in act:
+            refused = check_drive_command(str(act["run"]), workdir, git_state)
+            if not refused:
+                code, out, errout = runner(str(act["run"]), workdir, tmo)
+        elif "write" in act:
+            w = act["write"] if isinstance(act["write"], dict) else {}
+            p = _resolve(str(w.get("path", "")), workdir)
+            if not p or not w.get("path"):
+                refused = "refused: bad write path"
+            elif not path_allowed(p, workdir, strict_inside=True) or ".git" in p.split(os.sep) and \
+                    p.split(os.sep).index(".git") >= len(workdir.split(os.sep)):
+                refused = f"refused: write only inside the workdir ({workdir}) or /tmp/**/work/ (not .git): {w.get('path')}"
+            else:
+                try:
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    open(p, "w", encoding="utf-8").write(str(w.get("content", "")))
+                    code, out = 0, f"wrote {p} ({len(str(w.get('content', '')))} chars)"
+                except OSError as e:
+                    code, errout = 1, f"write failed: {e}"
+        else:  # code
+            c = dict(act["code"]) if isinstance(act["code"], dict) else {}
+            d = _resolve(str(c.get("dir") or "."), workdir)
+            if not c.get("task") or not d:
+                refused = "refused: code needs a task and a resolvable dir"
+            elif not path_allowed(d, workdir) or not os.path.isdir(d):
+                refused = f"refused: code dir must be an existing dir inside the workdir or /tmp/**/work/: {c.get('dir')}"
+            else:
+                c["_dir"] = d
+                code, out, errout = coder(c, workdir, model, min(step_timeout * 3, remaining), dl.dir, n)
+        if refused:
+            result, rec["exit"] = f"REFUSED by the engine: {refused}. Nothing was executed.", "refused"
+        else:
+            res_out, res_err = clip_output(out or ""), clip_output(errout or "")
+            result = f"exit code: {code}\n--- stdout ---\n{res_out}\n--- stderr ---\n{res_err}"
+            if len(out or "") > DRIVE_OUT_LIMIT or len(errout or "") > DRIVE_OUT_LIMIT:
+                result += "\n(output was truncated)"
+            rec["exit"] = code
+        rec.update(output=result, duration_s=round(clock() - ts, 1))
+        dl.step(rec)
+        steps.append({"n": n, "action": desc, "result": result})
+    return EXIT_LIMIT, f"max steps ({max_steps}) reached without done/blocked", len(steps)
+
+
+def cmd_drive(args):
+    set_stall(args)
+    task = open(args.task_file, encoding="utf-8").read()
+    lim = max_context(getattr(args, "max_context", None))
+    workdir = os.path.abspath(args.dir)
+    if not os.path.isdir(workdir):
+        sys.exit(f"ERROR: workdir {workdir} does not exist")
+    try:
+        files_text = build_prompt("", args.file, lim).strip() if args.file else ""
+    except ContextTooLarge as e:
+        context_fail(e, "ask", {"command": " ".join(sys.argv)})
+    logdir = args.log or os.path.join(HOME, "drive", RUN_ID)
+    model = args.model
+    if model == "auto" and is_gemini():
+        model = TIERS["hard"]  # drive is hard thinking by definition; no triage call per step
+    RUN["files"] = len(args.file or [])
+    runs = get_runs()
+    ctx = {"command": " ".join(sys.argv), "model_requested": model, "t0": time.time()}
+
+    def ask(prompt, mdl):
+        ctx["prompt_chars"] = len(prompt)
+        ans = ask_many([(prompt, mdl, None)])[0]
+        if isinstance(ans, Exception):
+            raise ans
+        return ans, RESULTS.get(0, {}).get("actual") or mdl
+
+    def notify(s):
+        log(s)
+        runs.note(s)
+
+    try:
+        code, text, n = drive_loop(task, files_text, workdir, ask, model, args.max_steps, args.step_timeout,
+                                   args.deadline_min, logdir, lim, notify=notify)
+    except ContextTooLarge as e:
+        context_fail(e, "ask", ctx)
+    except Exception as e:
+        if not getattr(e, "diag_line", None):
+            attach_diag(e, ctx)
+        fail_exit(e)
+    label = {0: "DONE", EXIT_BLOCKED: "BLOCKED", EXIT_LIMIT: "LIMIT"}.get(code, "ERROR")
+    print(f"drive: {label} after {n} steps\nresult: {text}\nlog: {logdir}/drive.md", flush=True)
+    sys.exit(code)
+
+
 # ---------------------------------------------------------------- router gate
 
-ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag", "watch", "whoami")
+ROUTER_SUBCMDS = ("ask", "code", "batch", "drive", "status", "serve", "diag", "watch", "whoami")
 ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py", "mistral-chat", "mistral_chat.py",
                    "deepseek-chat", "deepseek_chat.py")
 
@@ -1534,6 +2005,7 @@ def check_router_command(cmd):
     A router model may run exactly one `aistudio <subcommand> ...` per call and nothing
     else: no chaining, pipes, redirects (except `<` from a file), substitutions or
     multi-line scripts, so it cannot write or run code of its own."""
+    import re
     import shlex
     c = cmd.strip()
     if "\n" in c or "\r" in c:
@@ -1555,144 +2027,16 @@ def check_router_command(cmd):
         if not argv[0].startswith(("AISTUDIO_", "OFFLOAD_")):
             return "only AISTUDIO_*/OFFLOAD_* environment assignments are allowed"
         argv = argv[1:]
+    if argv and argv[0] == "timeout":  # `timeout [-k D] [-s S] DURATION aistudio ...`
+        i = 1
+        while i < len(argv) and argv[i].startswith("-"):
+            i += 2 if argv[i] in ("-k", "-s", "--kill-after", "--signal") else 1
+        if i < len(argv) and re.fullmatch(r"\d+(\.\d+)?[smhd]?", argv[i]):
+            argv = argv[i + 1:]
     if not argv or os.path.basename(argv[0]) not in ROUTER_BINARIES:
         return f"only these commands are allowed: {', '.join(ROUTER_BINARIES)}"
     if len(argv) < 2 or argv[1] not in ROUTER_SUBCMDS:
         return f"allowed subcommands: {', '.join(ROUTER_SUBCMDS)}"
-    return None
-
-
-MANAGER_TASK_WRITE = ("task*.md", "*.task.md")
-_SEPS = set(";&|\n()")
-_INTERPRETERS = {"bash", "sh", "zsh", "dash"}
-
-
-def _tmp_ok(path):
-    """Redirect targets a manager may write: /dev/null and scratch logs under /tmp."""
-    if path == "/dev/null":
-        return True
-    return path.startswith("/tmp/") and ("/work/" in path or "/logs" in path or path.endswith((".out", ".log")))
-
-
-def _manager_tokens(cmd):
-    import shlex
-    lx = shlex.shlex(cmd, posix=True, punctuation_chars=";<>|&()\n")
-    lx.whitespace = " \t\r"
-    lx.whitespace_split = True
-    lx.commenters = ""
-    return list(lx)
-
-
-def _check_manager_segment(argv, cwd=None):
-    """argv of one simple command (redirects already removed) -> reason or None."""
-    while argv and ("=" in argv[0] and argv[0].split("=")[0].replace("_", "a").isalnum()
-                    or os.path.basename(argv[0]) in ("sudo", "env", "time", "nohup", "command", "exec")):
-        argv = argv[1:]
-    if not argv:
-        return None
-    name, args = os.path.basename(argv[0]), argv[1:]
-    import re
-    if name == "eval":
-        return "eval of a string is not allowed"
-    if name in _INTERPRETERS and "-c" in args[:3]:
-        i = args.index("-c")
-        if i + 1 < len(args):
-            return check_manager_command(args[i + 1], cwd) or None
-        return None
-    if re.fullmatch(r"python[\d.]*|pypy3?", name):
-        for a in args:
-            if a == "-":
-                return "python reading a script from stdin (`python3 -`) is not allowed"
-            if a == "-m" or not a.startswith("-"):
-                return None  # module or a script file
-            if not a.startswith("--") and "c" in a[1:]:
-                return "inline python (`python3 -c`) is not allowed"
-        return "python without a script file (stdin/inline code) is not allowed"
-    if name in ("node", "nodejs", "ruby", "php") and any(a in ("-e", "-p", "--eval", "-r", "-E") for a in args):
-        return f"inline code (`{name} -e`) is not allowed"
-    if name == "sed" and any(a == "--in-place" or a.startswith("--in-place=") or
-                             (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) for a in args):
-        return "`sed -i` edits files in place"
-    if name == "perl" and any(a.startswith("-") and not a.startswith("--") and ("i" in a[1:] or "e" in a[1:] or "E" in a[1:])
-                              for a in args):
-        return "`perl -i/-e` is not allowed"
-    if name in ("awk", "gawk", "mawk") and any(re.search(r"print[^;}]*>|system\s*\(", a) for a in args):
-        return "awk writing to files / running commands is not allowed"
-    if name == "tee" and any(not a.startswith("-") and not _tmp_ok(_abs_target(a, cwd)) for a in args):
-        return "`tee` writes files"
-    if name in ("patch", "ap", "ap.py"):
-        return "patches must be applied inside `code` (the router applies them), not by the manager"
-    if name == "git":
-        sub = next((a for a in args if not a.startswith("-")), "")
-        if sub == "apply":
-            return "`git apply`: patch application must happen inside `aistudio code`"
-    if name == "gh":
-        for i, a in enumerate(args):
-            if a in ("--body", "-b") or a.startswith("--body="):
-                return "`gh ... --body` with an inline text (use --body-file)"
-            if name == "gh" and args[:1] == ["api"] and a in ("-f", "--raw-field", "-F", "--field") \
-                    and i + 1 < len(args) and args[i + 1].startswith("body="):
-                return "`gh api -f body=...` with an inline text"
-            if a.startswith(("--field=body=", "--raw-field=body=")):
-                return "`gh api --field body=...` with an inline text"
-    return None
-
-
-def _abs_target(target, cwd):
-    t = os.path.expanduser(target)
-    if not t or os.path.isabs(t) or not cwd:
-        return t
-    return os.path.normpath(os.path.join(cwd, t))
-
-
-def check_manager_command(cmd, cwd=None):
-    """Reason a Bash command is forbidden for the manager, or None.
-
-    Relative redirect targets are resolved against `cwd` (the hook's cwd) and any `cd DIR` before them."""
-    try:
-        toks = _manager_tokens(cmd)
-    except ValueError:
-        toks = cmd.split()
-    seg, i = [], 0
-    while i <= len(toks):
-        t = toks[i] if i < len(toks) else None
-        if t is None or (t and set(t) <= _SEPS):
-            why = _check_manager_segment(seg, cwd)
-            if why:
-                return why
-            if len(seg) == 2 and seg[0] == "cd":
-                d = os.path.expanduser(seg[1])
-                cwd = os.path.normpath(d if os.path.isabs(d) else os.path.join(cwd or "/", d))
-            seg = []
-        elif t.startswith("<<"):
-            return "heredocs / here-strings are not allowed"
-        elif t and set(t) <= set("<>&|") and ">" in t:
-            target = toks[i + 1] if i + 1 < len(toks) else ""
-            i += 1
-            if t.endswith("&") and (target.isdigit() or target == "-"):
-                pass  # fd duplication: 2>&1, >&2
-            elif not _tmp_ok(_abs_target(target, cwd)):
-                return f"output redirection to {target or '?'} writes a file"
-        else:
-            seg.append(t)
-        i += 1
-    return None
-
-
-def check_manager_tool(tool, tool_input, cwd=None):
-    """Orchestrator gate for a small manager model: None if the tool call is allowed, else why not."""
-    import fnmatch
-    tool_input = tool_input or {}
-    if tool in ("Edit", "MultiEdit", "NotebookEdit"):
-        return f"{tool} is forbidden"
-    if tool == "Write":
-        path = tool_input.get("file_path") or tool_input.get("path") or ""
-        base = os.path.basename(path)
-        if any(fnmatch.fnmatch(base, g) for g in MANAGER_TASK_WRITE) or "tasks" in path.split(os.sep)[:-1]:
-            return None
-        return f"Write to {path or '?'} is forbidden (only task descriptions: task*.md, *.task.md, tasks/)"
-    if tool == "Bash":
-        return check_manager_command(tool_input.get("command", ""), cwd)
     return None
 
 
@@ -1704,14 +2048,6 @@ def cmd_guard(args):
         print("router gate: bad hook input", file=sys.stderr)
         sys.exit(2)
     tool = ev.get("tool_name", "")
-    if getattr(args, "manager", False):
-        why = check_manager_tool(tool, ev.get("tool_input"), ev.get("cwd"))
-        if why:
-            print(f"MANAGER GATE: {why}. You orchestrate only: give substantive work (code, analysis, "
-                  "triage, texts, markdown edits) to a router subagent (gemini-router / mistral-router) "
-                  "via a task file.", file=sys.stderr)
-            sys.exit(2)
-        sys.exit(0)
     if tool != "Bash":
         print(f"ROUTER GATE: tool {tool} is forbidden. You are a router: only run "
               "`aistudio ...` commands; Gemini does all thinking and writing.", file=sys.stderr)
@@ -1937,8 +2273,14 @@ def main():
     s.add_argument("--dry-run", action="store_true",
                    help="get the model's ap patch, save and validate it with `ap --dry-run`; apply nothing")
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
-    s = sub.add_parser("guard", help="PreToolUse hook that gates router models (--manager: orchestrator gate)")
-    s.add_argument("--manager", action="store_true", help="gate for a manager that must offload all work")
+    s = sub.add_parser("drive", help="Gemini drives a multi-step task; the ENGINE executes its shell/code/write actions")
+    s.add_argument("--task-file", required=True); s.add_argument("-f", "--file", action="append")
+    s.add_argument("-C", "--dir", default="."); s.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    s.add_argument("--max-steps", type=int, default=80); s.add_argument("--step-timeout", type=int, default=600)
+    s.add_argument("--deadline-min", type=float, default=50); s.add_argument("--log", help="log dir (drive.jsonl, drive.md)")
+    s.add_argument("--max-context", type=int, help="max chars of one prompt (default $OFFLOAD_MAX_CONTEXT or 400000)")
+    watch_opts(s); s.set_defaults(fn=cmd_drive)
+    s = sub.add_parser("guard", help="PreToolUse hook that gates router models")
     s.set_defaults(fn=cmd_guard)
     s = sub.add_parser("diag", help="print the last N failure diagnostics summaries")
     s.add_argument("n", nargs="?", type=int, default=1); s.set_defaults(fn=cmd_diag)
@@ -1949,7 +2291,7 @@ def main():
     s.add_argument("-i", "--interval", type=float, default=5); s.add_argument("--json", action="store_true")
     s.set_defaults(fn=lambda a: cmd_runs(a, follow=True))
     a = p.parse_args()
-    if a.cmd in ("ask", "code", "batch"):
+    if a.cmd in ("ask", "code", "batch", "drive"):
         chain_guard()
     a.fn(a)
 

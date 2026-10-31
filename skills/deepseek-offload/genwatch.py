@@ -3,7 +3,7 @@
 * heartbeat: every N seconds one stderr line per request in flight, so a silent wait is
   never silent:  [aistudio] waiting: model=M, elapsed=95s, answer_chars=1200 (+300), state=generating
 * run status file ~/.offload-browser/run-<pid>.json (no secrets), refreshed every few seconds,
-  so an orchestrator can ask "is the generation alive?" with one command:
+  so a caller can ask "is the generation alive?" with one command:
   `aistudio status --runs` (one-shot) / `aistudio watch` (until all runs finish).
 * ui_error(): recognises error banners/toasts of the chat UI (Permission denied, rate limit...).
 * retry_pause(): how long to wait before the next attempt, by failure kind.
