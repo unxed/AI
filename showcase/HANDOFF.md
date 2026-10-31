@@ -27,11 +27,13 @@ e2-micro VM** (use `code --ci`, i.e. GitHub Actions).
      (Mistral, NVIDIA NIM, Zhipu/GLM, DeepSeek, OpenRouter) in its dashboard.
    - Owner decision (2026-10-31): no keys will be added, so this test is skipped via FreeLLMAPI.
      Rerun `./opencode-router-test/run.sh` only if keys or another free provider appear.
-2. Local quantized model as router.
-   - llama.cpp b12017 CPU is at `~/opt/llama/dl/llama-b12017/`.
-   - The model is `~/opt/llama/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` (unsloth, HF).
-   - Serve it: `llama-server -m <gguf> --jinja -c 16384 --port 8088`.
-   - Test it: `PROVIDER=llamacpp PAIRS=qwen3-4b:mistral-router ./opencode-router-test/run.sh`.
+2. Local quantized model as router: tested and failed (2026-10-31).
+   - Setup: Qwen3-4B-Instruct-2507 Q4_K_M with llama.cpp b12017 on CPU (`llama-server --jinja`),
+     driven by opencode with the mistral-router agent.
+   - It answered 37*41 itself and never called `mistral-chat`.
+   - One turn took 18 min (4 cores; the laptop was swapping).
+   - A larger or better tool-following model would be needed, plus a check that the answer
+     actually came from the worker.
 3. Grok in X: the skill is installed on the laptop, but the X login fails.
    - "Continue with Google" opens the Google popup and the account gets picked, then X silently
      stays logged out.
@@ -39,4 +41,4 @@ e2-micro VM** (use `code --ci`, i.e. GitHub Actions).
      by hand with `grok login`.
 4. FreeLLMAPI on the VM: undecided (1 GB RAM is shared with Chrome). The alternative is an SSH
    tunnel to the laptop's instance.
-5. README for unxed/AI (overview + results above).
+5. README: done (`README.md`).
