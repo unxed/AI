@@ -36,11 +36,15 @@ Use **only** the Claude app's built-in browser tools:
 
 - Use `find` to locate the message input box.
 - Use `form_input` to put **the full task text exactly as the caller gave it** into the input. This may include file contents **only if the caller explicitly attached them to the task text**. The router **never** picks files or attachments itself.
+- Generate a random 6-hex tag (e.g. `3f9a1c`) and append to the end of the prompt an instruction that the model's whole answer must be between the lines `<<<ANSWER-<tag>>>>` and `<<<END-<tag>>>>`.
 - Submit: press Enter, or click the send button (`find` the button, then `computer` click).
 
 ### 3. Wait for the answer
 
 - Poll with `get_page_text` every **10–15 seconds**.
+- Read the page with get_page_text and take the text between the LAST occurrence of `<<<ANSWER-<tag>>>>` and the LAST occurrence of `<<<END-<tag>>>>` — the first occurrences belong to the echoed prompt and are wrong.
+- The answer is complete only when the end marker after the last start marker is present AND the text did not change between two polls.
+- If the model omitted the markers, fall back to the old way (cut the answer manually) and say so in the report; do not include the markers themselves in the returned answer.
 - The answer is **complete** when **both**:
   - its text has not changed across **two consecutive polls**, and
   - no "stop generating" control is present.
