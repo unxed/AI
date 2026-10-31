@@ -38,3 +38,12 @@ Notes:
 install to `~/.claude/agents/`) and `agents/opencode/grok-router.md` (opencode: bash allowed
 only for `grok …`). The gate blocks anything except a single `grok ask|code|batch|status|serve`
 command — no chaining, redirects, substitutions or file writes.
+
+## Vendor chain (hard rule)
+
+A vendor never offloads to itself, directly or anywhere up a chain (no Gemini planning work
+for Gemini, no Haiku→Gemini→…→Gemini). Every ask/code/batch call needs `OFFLOAD_CALLER=<model>`
+(auto-detected as `anthropic` inside Claude Code) and honours `OFFLOAD_CHAIN` (e.g.
+`anthropic>google`): if the worker's vendor is already in it, the call is refused. The extended
+chain is exported to child processes (e.g. the `-t` test command) and printed on stderr — pass
+it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.

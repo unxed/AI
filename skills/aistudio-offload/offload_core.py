@@ -28,19 +28,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import Chrome, _port_open  # noqa: E402
 
-HOME = os.path.expanduser(os.environ.get("AISTUDIO_HOME", "~/.aistudio"))
-COOKIES = os.path.join(HOME, "cookies.json")
+# One Chrome profile shared by all *-offload skills: a single Google sign-in also covers
+# "Sign in with Google" on Mistral/DeepSeek, and all skills reuse one running Chrome.
+HOME = os.path.expanduser(os.environ.get("AISTUDIO_HOME") or os.environ.get("OFFLOAD_HOME")
+                          or "~/.offload-browser")
+VENDOR = "google"  # vendor of the worker model; provider wrappers override
+COOKIES = os.path.join(HOME, f"cookies-{VENDOR}.json")
 PROFILE = os.path.join(HOME, "profile")
 PORT_FILE = os.path.join(HOME, "chrome.port")
 DEFAULT_MODEL = os.environ.get("AISTUDIO_MODEL", "auto")
 # `-m auto`: a quick triage call to a small Gemini picks the worker by difficulty.
-TIERS = {"simple": "gemini-3.5-flash", "medium": "gemini-3.8-flash", "hard": "gemini-3.1-pro-preview"}
+# (the chat UI offers no gemini-3.5-flash / 2.5 text models any more, only TTS variants)
+TIERS = {"simple": "gemini-3.5-flash-lite", "medium": "gemini-3.8-flash", "hard": "gemini-3.1-pro-preview"}
 TRIAGE_MODEL = os.environ.get("AISTUDIO_TRIAGE_MODEL", "gemini-3.1-flash-lite")
 # on quota/empty answers try the next model of the chain instead of hammering the same one
-FALLBACK = {"gemini-3.1-pro-preview": ["gemini-2.5-pro", "gemini-3.8-flash"],
-            "gemini-3.8-flash": ["gemini-3.5-flash", "gemini-2.5-flash"],
-            "gemini-3.5-flash": ["gemini-2.5-flash", "gemini-3.8-flash"],
-            "gemini-2.5-pro": ["gemini-3.8-flash"], "gemini-2.5-flash": ["gemini-3.5-flash"]}
+FALLBACK = {"gemini-3.1-pro-preview": ["gemini-pro-latest", "gemini-3.8-flash"],
+            "gemini-3.8-flash": ["gemini-3-flash-preview", "gemini-flash-latest"],
+            "gemini-3.5-flash-lite": ["gemini-3.1-flash-lite", "gemini-flash-lite-latest"],
+            "gemini-3.1-flash-lite": ["gemini-flash-lite-latest"]}
 TRIAGE_PROMPT = """You route tasks to LLMs. Rate how hard the TASK below is for a strong LLM.
 simple = factual question, short rewrite/translation, trivial or boilerplate code;
 medium = typical coding task: a feature or bugfix in a few files, a review, a plan;
@@ -72,6 +77,12 @@ def _logged_in(cookies):
 
 def logged_in(cookies):  # indirection so provider wrappers can replace it
     return _logged_in(cookies)
+
+
+def login_done(ch, tab, url):
+    """Login page poll: session cookie present and we left the sign-in flow (Chrome may
+    show a chrome:// interstitial instead of the target URL). Providers may override."""
+    return logged_in(ch.cookies()) and "/signin/" not in url and "/flow/" not in url
 
 
 def _save_cookies(ck):
@@ -154,9 +165,8 @@ def cmd_login(args):
                 return self._send(LOGIN_HTML.encode(), "text/html; charset=utf-8")
             img, url = tab.screenshot(), tab.url() or ""
             st = url[:70]
-            ck = ch.cookies()  # done = session cookie present (URL may be a chrome:// interstitial)
-            if logged_in(ck) and "/signin/" not in url and "/flow/" not in url:
-                _save_cookies(ck)
+            if login_done(ch, tab, url):
+                _save_cookies(ch.cookies())
                 state["done"] = True
                 st = "DONE"
             self._send(img, "image/jpeg", {"X-Status": st})
@@ -239,16 +249,58 @@ def _js_str(s):
     return json.dumps(s)
 
 
+JS_CLOSE_DIALOGS = """(()=>{let n=0; for (const b of document.querySelectorAll(
+    '.cdk-overlay-container button, mat-dialog-container button, button')) {
+    const t=(b.getAttribute('aria-label')||b.innerText||'').trim();
+    if (/^(close|got it|dismiss|no thanks|not now|maybe later)$/i.test(t) && b.offsetParent) {b.click(); n++;}
+  } return n;})()"""
+
+# Capture the GenerateContent XHR inside the page: AI Studio reads it as a stream and the
+# body is not retrievable via CDP afterwards, so keep the latest responseText ourselves.
+JS_HOOK = """(()=>{ if (window.__ofl) return 'already';
+  window.__ofl = {n:0, done:false, text:'', status:0};
+  const O = XMLHttpRequest.prototype.open, S = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(m, u) { this.__u = String(u); return O.apply(this, arguments); };
+  XMLHttpRequest.prototype.send = function(b) {
+    if (this.__u && this.__u.includes('/GenerateContent')) {
+      const x = this, st = window.__ofl = {n: window.__ofl.n + 1, done:false, text:'', status:0};
+      const upd = () => { try { if (x.responseText) st.text = x.responseText; } catch (e) {} st.status = x.status; };
+      x.addEventListener('readystatechange', upd); x.addEventListener('progress', upd);
+      x.addEventListener('loadend', () => { upd(); st.done = true; });
+    }
+    return S.apply(this, arguments);
+  }; return 'hooked'; })()"""
+
+
+def select_model(tab, model):
+    """AI Studio ignores ?model=; pick it in the model selector (sticky per account)."""
+    cur = tab.c.eval("(document.querySelector('ms-model-selector [data-test-id=model-name]')||{}).innerText||''")
+    if cur.strip() == model:
+        return
+    tab.c.eval("document.querySelector('ms-model-selector button').click()")
+    tab.wait_js("document.querySelectorAll('ms-model-carousel-row').length > 0", timeout=20)
+    tab.c.eval("""(()=>{const e=[...document.querySelectorAll('ms-model-carousel *')].find(e=>
+        e.children.length===0 && (e.innerText||'').trim()==='All'); if (e) (e.closest('button')||e).click();})()""")
+    time.sleep(1.0)
+    ok = tab.c.eval(f"""(()=>{{const id=r=>(r.innerText.match(/(gemini|gemma)-[\\w.-]+/)||[''])[0];
+        const r=[...document.querySelectorAll('ms-model-carousel-row')].find(r=>id(r)==={json.dumps(model)});
+        if (!r) return false; (r.querySelector('button')||r).click(); return true;}})()""")
+    if not ok:
+        tab.key("Escape")
+        raise RuntimeError(f"model {model!r} is not available in the AI Studio chat UI")
+    tab.wait_js(f"(document.querySelector('ms-model-selector [data-test-id=model-name]')||{{}}).innerText==={json.dumps(model)}",
+                timeout=20)
+
+
 def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
-    tab = ch.new_tab(f"{BASE}/prompts/new_chat?model={model}")
+    tab = ch.new_tab(f"{BASE}/prompts/new_chat")
     try:
         tab.wait_js(f"!!{JS_BOX} || location.host.startsWith('accounts.')", timeout=90)
         if "accounts.google.com" in (tab.url() or ""):
             raise RuntimeError("Session expired: run `aistudio login` again.")
-        # close onboarding/announcement dialogs if any
-        tab.c.eval("""for (const b of document.querySelectorAll('button')) {
-            const t=(b.innerText||b.getAttribute('aria-label')||'').trim();
-            if (/^(Got it|Dismiss|No thanks|Close)$/i.test(t) && b.offsetParent) b.click(); }""")
+        time.sleep(1.5)  # late announcement/upsell dialogs
+        tab.c.eval(JS_CLOSE_DIALOGS)
+        select_model(tab, model)
         if system:
             tab.c.eval("""(()=>{const b=[...document.querySelectorAll('button')].find(b=>
                 /System instructions/i.test(b.innerText||b.getAttribute('aria-label')||''));
@@ -256,12 +308,28 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
             tab.wait_js("!!document.querySelector(\"textarea[aria-label*='System instructions' i]\")", 15)
             tab.c.eval(_fill_js("document.querySelector(\"textarea[aria-label*='System instructions' i]\")",
                                 system))
+            tab.key("Escape")
+        tab.c.eval(JS_HOOK)
         tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)
         tab.wait_js(f"{JS_RUN} && !{JS_RUN}.disabled", timeout=60)
-        status, raw = tab.capture_response(GEN_RPC, lambda: tab.c.eval(f"{JS_RUN}.click()"),
-                                           timeout=timeout)
-        if status != 200:
-            raise RuntimeError(f"HTTP {status}: {raw[:300]}")
+        started = False
+        for _ in range(3):  # a dialog may swallow the first click
+            tab.c.eval(JS_CLOSE_DIALOGS)
+            tab.c.eval(f"{JS_RUN}.click()")
+            try:
+                tab.wait_js("window.__ofl && window.__ofl.n > 0", timeout=20)
+                started = True
+                break
+            except TimeoutError:
+                continue
+        if not started:
+            err = tab.c.eval("(document.querySelector('ms-callout, .error, [role=alert]')||{}).innerText||''")
+            raise RuntimeError(f"Run did not start (quota? dialog?). {err}")
+        tab.wait_js("window.__ofl.done", timeout=timeout, interval=1.0)
+        st = tab.c.eval("window.__ofl")
+        raw = st.get("text") or ""
+        if st.get("status") not in (200, 0) or not raw:
+            raise RuntimeError(f"HTTP {st.get('status')}: {raw[:300]}")
         text = parse_generate(raw)
         if not text.strip():
             err = tab.c.eval("(document.querySelector('ms-callout, .error, [role=alert]')||{}).innerText||''")
@@ -526,7 +594,8 @@ def cmd_code(args):
 # ---------------------------------------------------------------- router gate
 
 ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve")
-ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py")
+ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py", "mistral-chat", "mistral_chat.py",
+                   "deepseek-chat", "deepseek_chat.py")
 
 
 def check_router_command(cmd):
@@ -553,8 +622,8 @@ def check_router_command(cmd):
     except ValueError as e:
         return f"unparsable command: {e}"
     while argv and "=" in argv[0] and argv[0].split("=")[0].isidentifier():
-        if not argv[0].startswith("AISTUDIO_"):
-            return "only AISTUDIO_* environment assignments are allowed"
+        if not argv[0].startswith(("AISTUDIO_", "OFFLOAD_")):
+            return "only AISTUDIO_*/OFFLOAD_* environment assignments are allowed"
         argv = argv[1:]
     if not argv or os.path.basename(argv[0]) not in ROUTER_BINARIES:
         return f"only these commands are allowed: {', '.join(ROUTER_BINARIES)}"
@@ -591,6 +660,57 @@ def cmd_status(args):
     sys.exit(0 if ok else 1)
 
 
+# ---------------------------------------------------------------- vendor chain
+
+VENDORS = {
+    "anthropic": ("claude", "haiku", "sonnet", "opus", "fable", "anthropic"),
+    "openai": ("gpt", "openai", "luna", "terra", "astra", "codex", "o3", "o4"),
+    "google": ("gemini", "gemma", "google", "aistudio"),
+    "xai": ("grok", "xai"),
+    "mistral": ("mistral", "codestral", "magistral", "devstral", "ministral", "pixtral", "lechat"),
+    "deepseek": ("deepseek",),
+    "zhipu": ("glm", "zhipu", "z.ai", "zai"),
+    "nvidia": ("nemotron", "nvidia"),
+    "alibaba": ("qwen", "alibaba"),
+    "moonshot": ("kimi", "moonshot"),
+    "xiaomi": ("mimo", "xiaomi"),
+    "minimax": ("minimax",),
+}
+
+
+def vendor_of(name):
+    n = name.strip().lower()
+    for v, keys in VENDORS.items():
+        if any(k in n for k in keys):
+            return v
+    return n
+
+
+def chain_guard():
+    """Never let a vendor offload to itself, directly or anywhere up the chain.
+
+    OFFLOAD_CHAIN (e.g. "anthropic>google") lists the vendors that already planned or did
+    work for this task; OFFLOAD_CALLER names the model running this command. If the worker's
+    vendor is among them we refuse. The extended chain is exported to child processes and
+    printed, so sub-tasks derived from the answer carry it on."""
+    chain = [vendor_of(v) for v in os.environ.get("OFFLOAD_CHAIN", "").replace(",", ">").split(">")
+             if v.strip()]
+    caller = os.environ.get("OFFLOAD_CALLER") or ("anthropic" if os.environ.get("CLAUDECODE") else "")
+    if not caller and not chain:
+        sys.exit(f"REFUSED: set OFFLOAD_CALLER=<your model id or vendor> (e.g. OFFLOAD_CALLER=glm-5.3) "
+                 f"so that a {VENDOR} model never offloads to {VENDOR}.")
+    if caller and (not chain or chain[-1] != vendor_of(caller)):
+        chain.append(vendor_of(caller))
+    if VENDOR in chain:
+        sys.exit(f"REFUSED: offload chain {'>'.join(chain)} already contains vendor '{VENDOR}'. "
+                 f"A vendor must not offload to itself (directly or via a nested chain); "
+                 f"use a different worker skill.")
+    full = ">".join(chain + [VENDOR])
+    os.environ["OFFLOAD_CHAIN"] = full
+    log(f"chain {full}: run any sub-task derived from this answer with OFFLOAD_CHAIN={full}")
+    return full
+
+
 def main():
     p = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -619,6 +739,8 @@ def main():
     s.set_defaults(fn=cmd_guard)
     s = sub.add_parser("status"); s.set_defaults(fn=cmd_status)
     a = p.parse_args()
+    if a.cmd in ("ask", "code", "batch"):
+        chain_guard()
     a.fn(a)
 
 

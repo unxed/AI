@@ -87,6 +87,15 @@ agent above it. A main agent that knows better passes `-m <id>`. Avoid `gemini-3
 Main agent usage: write the task to a file, then delegate:
 "Use gemini-router: `aistudio code --task-file /tmp/t.md -C ~/repo -t 'make test' -m gemini-3.1-pro-preview`".
 
+## Vendor chain (hard rule)
+
+A vendor never offloads to itself, directly or anywhere up a chain (no Gemini planning work
+for Gemini, no Haiku→Gemini→…→Gemini). Every ask/code/batch call needs `OFFLOAD_CALLER=<model>`
+(auto-detected as `anthropic` inside Claude Code) and honours `OFFLOAD_CHAIN` (e.g.
+`anthropic>google`): if the worker's vendor is already in it, the call is refused. The extended
+chain is exported to child processes (e.g. the `-t` test command) and printed on stderr — pass
+it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
+
 ## Troubleshooting
 
 - `Session expired` → `aistudio login` again.

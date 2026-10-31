@@ -16,7 +16,6 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-os.environ.setdefault("AISTUDIO_HOME", os.path.expanduser(os.environ.get("GROK_HOME", "~/.grok-offload")))
 sys.path.insert(0, HERE)
 import offload_core as eng  # noqa: E402
 
@@ -109,6 +108,8 @@ def grok_ask_tab(ch, prompt, model="fast", system=None, timeout=900):
 
 def main():
     eng.PROG = "grok"
+    eng.VENDOR = "xai"
+    eng.COOKIES = os.path.join(eng.HOME, "cookies-xai.json")
     eng.DEFAULT_MODEL = os.environ.get("GROK_MODE", "fast")
     eng.LOGIN_URL = "https://x.com/i/flow/login?redirect_after_login=%2Fi%2Fgrok"
     eng.DONE_HOST = "x.com/i/grok"
