@@ -460,7 +460,9 @@ def ask_many(jobs, jobs_n=3, retries=2):
         for attempt in range(retries + 1):
             m = chain[min(attempt, len(chain) - 1)]
             try:
-                return globals()["ask_tab"](ch, prompt, m, system)
+                out = globals()["ask_tab"](ch, prompt, m, system)
+                log(f"answered by {m}")  # may be a fallback model: name it in reports/PRs
+                return out
             except Exception as e:
                 if attempt == retries or "login" in str(e):
                     return e
