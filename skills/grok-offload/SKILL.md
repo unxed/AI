@@ -58,3 +58,23 @@ for Gemini, no Haiku→Gemini→…→Gemini). Every ask/code/batch call needs `
 `anthropic>google`): if the worker's vendor is already in it, the call is refused. The extended
 chain is exported to child processes (e.g. the `-t` test command) and printed on stderr — pass
 it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
+
+## Manager gate, context size, diagnostics
+
+- **Web UI only (hard rule)**: Grok in X (x.com/i/grok) is reached only through the browser UI driven over CDP. Never add or use an API path; never use its API, API keys or SDKs.
+- **The main agent never does the work itself** when offloading: no code, analysis, triage, texts or markdown
+  edits of its own. Write a task file and hand it to the router subagent.
+- **Manager gate**: make a small orchestrator model unable to cheat with the PreToolUse hook `grok guard --manager`
+  (blocks Edit/MultiEdit/NotebookEdit, Write except `task*.md`/`*.task.md`/`tasks/`, and inline code or file writes in
+  Bash: `python3 -c`, heredocs, `sed -i`, `perl -e/-i`, `tee`, `> file`, `git apply`/`patch`/`ap`, `gh --body "..."`):
+  `claude -p --settings '{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"grok guard --manager"}]}]}}'`
+- **Context size**: the packed context (+task) is limited to 400000 chars (`--max-context N` on `code`/`ask`, or
+  `OFFLOAD_MAX_CONTEXT`). Nothing is ever truncated: over the limit the command exits with code 3 and lists the 15
+  largest files. `code` on a big repo needs `-p <paths...>`; for `ask` pass fewer `-f`. Every call logs
+  `context: N files, M chars`.
+- **Diagnostics**: every failed model request saves `~/.offload-browser/diag/<UTC>-<pid>/` (`summary.txt`, `page.txt`,
+  `screenshot.jpg`, `alerts.txt`) and prints `DIAG <REASON> <dir>: <message>`. Reasons: STALLED QUOTA RATE_LIMIT
+  PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED
+  UNKNOWN. `grok diag [N]` prints the last N summaries (routers may run it).
+- **Stall watchdog** (AI Studio engine): progress is logged every 30 s; no output growth for 180 s
+  (`OFFLOAD_STALL_SECONDS` / `--stall`) = STALLED, a bundle is saved and the request is retried in a fresh tab.

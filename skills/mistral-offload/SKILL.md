@@ -49,3 +49,23 @@ on stderr: pass it to any sub-task you derive from the answer.
 `agents/claude/mistral-router.md` (Claude Code: Bash only + `PreToolUse` hook
 `mistral-chat guard`, install to `~/.claude/agents/`) and `agents/opencode/mistral-router.md`
 (bash allowed only for `mistral-chat …`).
+
+## Manager gate, context size, diagnostics
+
+- **Web UI only (hard rule)**: Le Chat (chat.mistral.ai) is reached only through the browser UI driven over CDP. Never add or use an API path; never use its API, API keys or SDKs.
+- **The main agent never does the work itself** when offloading: no code, analysis, triage, texts or markdown
+  edits of its own. Write a task file and hand it to the router subagent.
+- **Manager gate**: make a small orchestrator model unable to cheat with the PreToolUse hook `mistral-chat guard --manager`
+  (blocks Edit/MultiEdit/NotebookEdit, Write except `task*.md`/`*.task.md`/`tasks/`, and inline code or file writes in
+  Bash: `python3 -c`, heredocs, `sed -i`, `perl -e/-i`, `tee`, `> file`, `git apply`/`patch`/`ap`, `gh --body "..."`):
+  `claude -p --settings '{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"mistral-chat guard --manager"}]}]}}'`
+- **Context size**: the packed context (+task) is limited to 400000 chars (`--max-context N` on `code`/`ask`, or
+  `OFFLOAD_MAX_CONTEXT`). Nothing is ever truncated: over the limit the command exits with code 3 and lists the 15
+  largest files. `code` on a big repo needs `-p <paths...>`; for `ask` pass fewer `-f`. Every call logs
+  `context: N files, M chars`.
+- **Diagnostics**: every failed model request saves `~/.offload-browser/diag/<UTC>-<pid>/` (`summary.txt`, `page.txt`,
+  `screenshot.jpg`, `alerts.txt`) and prints `DIAG <REASON> <dir>: <message>`. Reasons: STALLED QUOTA RATE_LIMIT
+  PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED
+  UNKNOWN. `mistral-chat diag [N]` prints the last N summaries (routers may run it).
+- **Stall watchdog** (AI Studio engine): progress is logged every 30 s; no output growth for 180 s
+  (`OFFLOAD_STALL_SECONDS` / `--stall`) = STALLED, a bundle is saved and the request is retried in a fresh tab.

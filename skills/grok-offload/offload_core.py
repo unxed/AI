@@ -21,6 +21,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -297,6 +298,65 @@ def select_model(tab, model):
                 timeout=20)
 
 
+STALL_SECONDS = float(os.environ.get("OFFLOAD_STALL_SECONDS") or 180)
+PROGRESS_LOG_EVERY = 30
+JS_GEN_STATE = """(()=>{const o=window.__ofl||{}; const txt=o.text||''; let done=!!o.done;
+  if(!done){try{JSON.parse(txt); done=txt.length>0}catch(e){}}
+  const t=[...document.querySelectorAll('ms-chat-turn')].pop();
+  const e=t&&t.querySelector('[class*=error]'); const err=e&&e.innerText.trim()?e.innerText.trim():'';
+  const rb=document.querySelector('ms-run-button');
+  return {done, err, n:txt.length, turn:t?(t.innerText||'').length:0,
+          busy:!!(rb&&/stop/i.test((rb.innerText||'')+(rb.getAttribute('aria-label')||'')))
+              || !!document.querySelector('button[aria-label*="Stop" i]')};})()"""
+
+
+class StallError(RuntimeError):
+    pass
+
+
+def stall_decision(size, last_size, last_change, now, stall_s):
+    """Pure progress watchdog step -> (new_last_size, new_last_change, stalled).
+    `size` is the current amount of generated output (chars); stalled = no growth for stall_s."""
+    if size > last_size:
+        return size, now, False
+    return last_size, last_change, (now - last_change) >= stall_s
+
+
+def wait_generation(tab, timeout, stall_s=None):
+    """Wait for the answer; returns 'DONE' or 'ERR:<text>'. Logs progress every 30 s and raises
+    StallError when the output does not grow for the stall window (default 180 s)."""
+    stall_s = stall_s or STALL_SECONDS
+    start = time.time()
+    last_size, last_change, last_log, seen_busy, gone_since = 0, start, start, False, None
+    while True:
+        now = time.time()
+        if now - start > timeout:
+            raise TimeoutError("timeout waiting for the answer (window.__ofl)")
+        try:
+            st = tab.c.eval(JS_GEN_STATE, timeout=20) or {}
+        except RuntimeError:
+            st = {}
+        if st.get("done"):
+            return "DONE"
+        if st.get("err"):
+            return "ERR:" + st["err"]
+        size = max(st.get("n", 0), st.get("turn", 0))
+        last_size, last_change, stalled = stall_decision(size, last_size, last_change, now, stall_s)
+        if now - last_log >= PROGRESS_LOG_EVERY:
+            log(f"generating: {size} chars, {int(now - start)}s")
+            last_log = now
+        if st.get("busy"):
+            seen_busy, gone_since = True, None
+        elif seen_busy and size == 0:
+            gone_since = gone_since or now
+            if now - gone_since >= 20:
+                raise RuntimeError("Empty answer: the generation indicator disappeared with no response")
+        if stalled:
+            raise StallError(f"STALLED: no output growth for {int(now - last_change)}s "
+                             f"(size {size} chars, {int(now - start)}s since start)")
+        tab.c.pump(1.0)
+
+
 def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
     tab = ch.new_tab(f"{BASE}/prompts/new_chat")
     try:
@@ -352,11 +412,7 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
             raise RuntimeError(f"Run did not start (quota? dialog?). {err}")
         # done, or an error shown in the model turn (quota, "Permission denied", safety...)
         # (the XHR may stay open after the answer: complete = the streamed JSON array parses)
-        res = tab.wait_js("""(window.__ofl.done || (()=>{try{JSON.parse(window.__ofl.text);return true}
-            catch(e){return false}})()) ? 'DONE' : (()=>{const t=[...document.querySelectorAll(
-            'ms-chat-turn')].pop(); const e=t && t.querySelector('[class*=error]');
-            return e && e.innerText.trim() ? 'ERR:' + e.innerText.trim() : '';})()""",
-                          timeout=timeout, interval=1.0)
+        res = wait_generation(tab, timeout)
         if res.startswith("ERR:"):
             raise RuntimeError(f"AI Studio error: {res[4:][:300]}")
         st = tab.c.eval("window.__ofl")
@@ -378,6 +434,196 @@ _GEMINI_ASK_TAB = ask_tab
 def is_gemini():
     """True unless a provider wrapper (e.g. grok.py) replaced ask_tab."""
     return globals()["ask_tab"] is _GEMINI_ASK_TAB
+
+
+# ---------------------------------------------------------------- limits + diagnostics
+
+DEFAULT_MAX_CONTEXT = 400_000
+EXIT_CONTEXT = 3
+_tls = threading.local()
+RUN = {"files": None}  # set by commands for the diagnostics summary
+
+
+class ContextTooLarge(Exception):
+    def __init__(self, total, limit, sizes, nfiles):
+        self.total, self.limit, self.sizes, self.nfiles = total, limit, sizes, nfiles
+        super().__init__(f"packed context is {total:,} chars in {nfiles} files, limit {limit:,}")
+
+
+def max_context(arg=None):
+    """Context limit in chars: --max-context, else $OFFLOAD_MAX_CONTEXT, else 400k."""
+    if arg:
+        return int(arg)
+    try:
+        return int(os.environ.get("OFFLOAD_MAX_CONTEXT") or DEFAULT_MAX_CONTEXT)
+    except ValueError:
+        return DEFAULT_MAX_CONTEXT
+
+
+REASONS = ("STALLED", "QUOTA", "RATE_LIMIT", "PERMISSION_DENIED", "CONTEXT_TOO_LARGE", "NOT_LOGGED_IN", "SAFETY",
+           "EMPTY_ANSWER", "TIMEOUT", "UI_CHANGED", "PATCH_FAILED", "TESTS_FAILED", "UNKNOWN")
+_CLASSIFY = (
+    ("NOT_LOGGED_IN", r"session expired|log ?in again|sign in to continue|accounts\.google\.com|not logged"),
+    ("STALLED", r"stalled: no output growth"),
+    ("PERMISSION_DENIED", r"permission denied|permission_denied|\b403\b"),
+    ("CONTEXT_TOO_LARGE", r"too many tokens|token limit|context (length|window|limit)|too long|too large|"
+                          r"exceeds? the (maximum|limit)|input token|\b413\b|payload"),
+    ("RATE_LIMIT", r"rate.?limit|too many requests|\b429\b|slow down"),
+    ("QUOTA", r"quota|resource_exhausted|exhausted|usage limit|daily limit|limit reached|out of (credits|messages)"),
+    ("SAFETY", r"safety|blocked|prohibited|policy|moderation|harmful|recitation"),
+    ("EMPTY_ANSWER", r"empty answer"),
+)
+
+
+def classify_failure(exc, *texts):
+    """Short reason code for a failed model request from the exception and collected page texts."""
+    import re
+    msg = re.sub(r"\([^()]*\?\)", "", f"{exc}") if exc is not None else ""  # drop our "(quota? dialog?)" hints
+    blob = "\n".join([msg, *[t for t in texts if t]]).lower()
+    for code, rx in _CLASSIFY:
+        if re.search(rx, blob):
+            return code
+    if isinstance(exc, TimeoutError) or "timed out" in blob or "timeout" in blob:
+        # waiting for the answer = TIMEOUT; waiting for some page element = the UI changed
+        return "TIMEOUT" if "__ofl" in blob or not isinstance(exc, TimeoutError) else "UI_CHANGED"
+    if re.search(r"run did not start|not available in the .* chat ui|queryselector|cdp|no such|unexpected", blob):
+        return "UI_CHANGED"
+    return "UNKNOWN"
+
+
+JS_ALERTS = """(()=>{const out=[]; const sel='ms-callout, [role=alert], .error, mat-snack-bar-container, '+
+  'mat-snack-bar, simple-snack-bar, [class*=snack], [class*=toast]';
+  document.querySelectorAll(sel).forEach(e=>{const t=(e.innerText||'').trim(); if(t) out.push(e.tagName.toLowerCase()+': '+t)});
+  const ts=document.querySelectorAll('ms-chat-turn'); if(ts.length) out.push('LAST ms-chat-turn: '+ts[ts.length-1].innerText);
+  return out.join('\\n---\\n');})()"""
+JS_SELECTED = "(document.querySelector('ms-model-selector [data-test-id=model-name]')||{}).innerText||''"
+
+
+def snapshot_tab(tab):
+    """Everything useful about a tab that is about to be closed after a failure. Never raises."""
+    snap = {}
+
+    def grab(key, fn):
+        try:
+            snap[key] = fn()
+        except Exception as e:
+            snap[key] = None
+            snap.setdefault("errors", []).append(f"{key}: {type(e).__name__}: {e}")
+    grab("url", lambda: tab.url())
+    grab("page", lambda: (tab.c.eval("document.body.innerText", timeout=15) or "")[-20000:])
+    grab("alerts", lambda: tab.c.eval(JS_ALERTS, timeout=15) or "")
+    grab("ofl", lambda: tab.c.eval("window.__ofl ? {n:window.__ofl.n, done:window.__ofl.done, "
+                                   "status:window.__ofl.status, text:(window.__ofl.text||'').slice(0,2000)} : null", timeout=15))
+    grab("selected", lambda: (tab.c.eval(JS_SELECTED, timeout=15) or "").strip())
+    grab("shot", lambda: tab.screenshot())
+    return snap
+
+
+class _DiagChrome:
+    """Wraps Chrome for ask_tab calls (any provider): a tab closed while an exception is
+    propagating (ask_tab's `finally`) is snapshotted first, before the page is lost."""
+
+    def __init__(self, ch):
+        self._ch = ch
+
+    def __getattr__(self, name):
+        return getattr(self._ch, name)
+
+    def new_tab(self, *a, **k):
+        tab = self._ch.new_tab(*a, **k)
+        orig = tab.close
+
+        def close():
+            if sys.exc_info()[0] is not None:
+                try:
+                    _tls.snap = snapshot_tab(tab)
+                except Exception:
+                    pass
+            return orig()
+        tab.close = close
+        return tab
+
+
+def _oneline(x, n=300):
+    return " ".join(str(x).split())[:n]
+
+
+def write_diag(exc, ctx=None, snap=None, reason=None, detail=""):
+    """Save ~/.offload-browser/diag/<utc>-<pid>/ and return (reason, dir). Never raises."""
+    try:
+        ctx, snap = ctx or {}, snap or {}
+        alerts, page = snap.get("alerts") or "", snap.get("page") or ""
+        if not reason:
+            raw = snap["ofl"].get("text") if isinstance(snap.get("ofl"), dict) else ""
+            reason = classify_failure(exc, alerts, raw, detail)
+            if reason == "UNKNOWN" and page:  # page text last: it holds unrelated words (footer, menus)
+                reason = classify_failure(exc, alerts, raw, detail, page[-3000:])
+        base = os.path.join(HOME, "diag", f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}")
+        d, i = base, 1
+        while os.path.exists(d):
+            i += 1
+            d = f"{base}-{i}"
+        os.makedirs(d, exist_ok=True)
+        ofl = snap.get("ofl")
+        lines = [f"reason: {reason}",
+                 f"command: {ctx.get('command') or ' '.join(sys.argv)}",
+                 f"provider: {PROG} ({VENDOR})",
+                 f"model_requested: {ctx.get('model_requested')}",
+                 f"model_selected: {snap.get('selected') or ctx.get('model_selected') or 'n/a'}",
+                 f"prompt_chars: {ctx.get('prompt_chars')}",
+                 f"files: {ctx.get('files') if ctx.get('files') is not None else RUN.get('files')}",
+                 f"elapsed_s: {round(time.time() - ctx['t0'], 1) if ctx.get('t0') else 'n/a'}",
+                 f"exception: {type(exc).__name__}: {_oneline(exc, 2000)}" if exc is not None else "exception: -",
+                 f"page_url: {snap.get('url')}",
+                 f"__ofl: {json.dumps({k: v for k, v in ofl.items() if k != 'text'}) if isinstance(ofl, dict) else None}",
+                 f"raw_response_head: {(ofl or {}).get('text', '')[:2000] if isinstance(ofl, dict) else ''}"]
+        if detail:
+            lines.append(f"detail:\n{detail[-3000:]}")
+        if snap.get("errors"):
+            lines.append("snapshot_errors: " + "; ".join(snap["errors"]))
+        for name, content in (("summary.txt", "\n".join(lines) + "\n"), ("page.txt", page), ("alerts.txt", alerts)):
+            with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+                f.write(content)
+        if isinstance(snap.get("shot"), (bytes, bytearray)):
+            with open(os.path.join(d, "screenshot.jpg"), "wb") as f:
+                f.write(snap["shot"])
+        return reason, d
+    except Exception:
+        return reason or "UNKNOWN", ""
+
+
+def attach_diag(exc, ctx=None, snap=None, reason=None, detail=""):
+    """Write a bundle for `exc` and set exc.diag_line = 'DIAG <REASON> <dir>: <message>'."""
+    reason, d = write_diag(exc, ctx, snap, reason, detail)
+    try:
+        exc.diag_reason, exc.diag_dir = reason, d
+        exc.diag_line = f"DIAG {reason} {d}: {_oneline(exc) or type(exc).__name__}"
+    except Exception:
+        pass
+    return exc
+
+
+def fail_exit(exc, code=1):
+    """Exit non-zero with the DIAG line (when there is one) as the final message."""
+    line = getattr(exc, "diag_line", None) or f"ERROR: {exc or type(exc).__name__}"
+    print(line, file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def context_fail(e, what="ask", ctx=None):
+    """Exit 3 with a message listing the largest files, never truncating."""
+    top = sorted(e.sizes, key=lambda x: -x[1])[:15]
+    hint = ("pass only the relevant files with `-p <paths...>`" if what == "code"
+            else "pass fewer -f files")
+    print(f"CONTEXT_TOO_LARGE: packed context is {e.total:,} chars in {e.nfiles} files, limit {e.limit:,} "
+          f"(--max-context N / OFFLOAD_MAX_CONTEXT). Nothing was sent.\n15 largest files:", file=sys.stderr)
+    for f, n in top:
+        print(f"  {n:>10,}  {f}", file=sys.stderr)
+    print(f"The caller must narrow the context: {hint}.", file=sys.stderr)
+    attach_diag(e, ctx, reason="CONTEXT_TOO_LARGE",
+                detail="\n".join(f"{n} {f}" for f, n in top))
+    print(e.diag_line, file=sys.stderr, flush=True)
+    sys.exit(EXIT_CONTEXT)
 
 
 def _fill_js(el, text):
@@ -420,13 +666,20 @@ def parse_generate(raw):
     return "".join(out)
 
 
-def build_prompt(text, files):
-    parts = []
+def build_prompt(text, files, limit=None):
+    """Inline `files` before the task. Raises ContextTooLarge (never truncates) when the
+    result would exceed `limit` chars (default: max_context())."""
+    limit = limit or max_context()
+    parts, sizes = [], []
     for f in files or []:
         body = open(f, encoding="utf-8", errors="replace").read()
+        sizes.append((f, len(body)))
         parts.append(f"=== FILE: {f} ===\n{body}\n=== END FILE: {f} ===")
     parts.append(text)
-    return "\n\n".join(parts)
+    out = "\n\n".join(parts)
+    if len(out) > limit:
+        raise ContextTooLarge(len(out), limit, sizes + [("<prompt text>", len(text))], len(sizes))
+    return out
 
 
 def choose_model(ch, prompt):
@@ -451,21 +704,31 @@ def ask_many(jobs, jobs_n=3, retries=2):
     ch = open_chrome()
     owned = ch.proc is not None  # we started it -> we stop it
 
+    dch = _DiagChrome(ch)
+
     def one(job):
         prompt, model, system = job
         model = model or DEFAULT_MODEL
+        ctx = {"command": " ".join(sys.argv), "model_requested": model, "prompt_chars": len(prompt),
+               "files": RUN.get("files"), "t0": time.time()}
         if model == "auto" and is_gemini():  # Gemini only; Grok has its own auto
             model = choose_model(ch, prompt)
         chain = [model] + FALLBACK.get(model, [])
         for attempt in range(retries + 1):
             m = chain[min(attempt, len(chain) - 1)]
+            _tls.snap = None
             try:
-                out = globals()["ask_tab"](ch, prompt, m, system)
+                out = globals()["ask_tab"](dch, prompt, m, system)
                 log(f"answered by {m}")  # may be a fallback model: name it in reports/PRs
                 return out
             except Exception as e:
                 if attempt == retries or "login" in str(e):
-                    return e
+                    ctx["model_selected"] = m
+                    return attach_diag(e, ctx, getattr(_tls, "snap", None))
+                if isinstance(e, StallError):  # keep evidence of each stall, then retry in a fresh tab
+                    ctx["model_selected"] = m
+                    _, sd = write_diag(e, ctx, getattr(_tls, "snap", None), "STALLED")
+                    log(f"{m}: STALLED, diagnostics in {sd}")
                 log(f"{m}: attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
                 # "Permission denied" comes and goes (more often right after a previous run):
                 # back off longer instead of hammering the account.
@@ -500,11 +763,27 @@ def cmd_stop(args):
     print("stopped")
 
 
+def set_stall(args):
+    global STALL_SECONDS
+    if getattr(args, "stall", None):
+        STALL_SECONDS = float(args.stall)
+
+
 def cmd_ask(args):
+    set_stall(args)
     text = sys.stdin.read() if args.prompt == "-" else args.prompt
-    ans = ask_many([(build_prompt(text, args.file), args.model, args.system)])[0]
+    lim = max_context(getattr(args, "max_context", None))
+    ctx = {"command": " ".join(sys.argv), "model_requested": args.model, "files": len(args.file or [])}
+    try:
+        prompt = build_prompt(text, args.file, lim)
+    except ContextTooLarge as e:
+        ctx["prompt_chars"] = e.total
+        context_fail(e, "ask", ctx)
+    RUN["files"] = len(args.file or [])
+    log(f"context: {RUN['files']} files, {len(prompt)} chars")
+    ans = ask_many([(prompt, args.model, args.system)])[0]
     if isinstance(ans, Exception):
-        sys.exit(f"ERROR: {ans or type(ans).__name__}")
+        fail_exit(ans)
     if args.out:
         open(args.out, "w").write(ans)
         log(f"answer written to {args.out} ({len(ans)} chars)")
@@ -515,11 +794,20 @@ def cmd_ask(args):
 def cmd_batch(args):
     """jsonl lines: {"id":..., "prompt":..., "model"?:..., "files"?:[...]} -> results jsonl."""
     jobs = [json.loads(line) for line in open(args.file) if line.strip()]
-    res = ask_many([(build_prompt(j["prompt"], j.get("files")), j.get("model", args.model),
-                     j.get("system")) for j in jobs], args.jobs)
+    built = []
+    for j in jobs:
+        try:
+            built.append((build_prompt(j["prompt"], j.get("files")), j.get("model", args.model), j.get("system")))
+        except ContextTooLarge as e:
+            built.append(attach_diag(e, {"command": f"batch job {j.get('id')}", "prompt_chars": e.total},
+                                     reason="CONTEXT_TOO_LARGE"))
+    ok = [b for b in built if not isinstance(b, Exception)]
+    it = iter(ask_many(ok, args.jobs) if ok else [])
+    res = [b if isinstance(b, Exception) else next(it) for b in built]
     for j, r in zip(jobs, res):
         out = {"id": j.get("id")}
-        out.update({"error": str(r) or type(r).__name__} if isinstance(r, Exception) else {"text": r})
+        out.update({"error": getattr(r, "diag_line", None) or str(r) or type(r).__name__}
+                   if isinstance(r, Exception) else {"text": r})
         print(json.dumps(out, ensure_ascii=False), flush=True)
 
 
@@ -533,9 +821,9 @@ SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".wasm", "
             ".jar", ".class", ".mp3", ".mp4", ".lock")
 
 
-def combine_tree(root, paths=None, max_bytes=3_000_000):
-    """Concatenate source files (read-only) as `=== BEGIN path ===` blocks.
-    In a git repo only tracked files are used; `paths` limits to given files/dirs."""
+def pack_tree(root, paths=None):
+    """Text files (read-only) as [(path, body)]. In a git repo only tracked files are used;
+    `paths` limits to given files/dirs."""
     root = os.path.abspath(root)
     try:
         files = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", *(paths or [])],
@@ -550,7 +838,7 @@ def combine_tree(root, paths=None, max_bytes=3_000_000):
                 dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x not in
                                  ("node_modules", "__pycache__", "venv", ".venv", "dist", "build"))
                 files += [os.path.relpath(os.path.join(d, f), root) for f in sorted(fs)]
-    out, total = [], 0
+    items = []
     for f in filter(None, files):
         full = os.path.join(root, f)
         if f.lower().endswith(SKIP_EXT) or not os.path.isfile(full) or os.path.islink(full):
@@ -559,12 +847,23 @@ def combine_tree(root, paths=None, max_bytes=3_000_000):
             body = open(full, encoding="utf-8").read()
         except (UnicodeDecodeError, OSError):
             continue
-        total += len(body)
-        if total > max_bytes:
-            log(f"context limit reached, skipping {f} and the rest")
-            break
-        out.append(f"=== BEGIN {f} ===\n{body}{'' if body.endswith(chr(10)) else chr(10)}=== END {f} ===")
-    return "\n\n".join(out)
+        items.append((f, body))
+    return items
+
+
+def render_tree(items):
+    return "\n\n".join(f"=== BEGIN {f} ===\n{body}{'' if body.endswith(chr(10)) else chr(10)}=== END {f} ==="
+                        for f, body in items)
+
+
+def combine_tree(root, paths=None, max_chars=None, extra=0):
+    """Concatenate source files as `=== BEGIN path ===` blocks. Never truncates: raises
+    ContextTooLarge when the result (+ `extra` chars of task text) exceeds `max_chars`."""
+    items = pack_tree(root, paths)
+    text = render_tree(items)
+    if max_chars and len(text) + extra > max_chars:
+        raise ContextTooLarge(len(text) + extra, max_chars, [(f, len(b)) for f, b in items], len(items))
+    return text
 
 
 CODE_RULES = """You are a senior engineer. Implement the TASK below in the given codebase.
@@ -673,6 +972,7 @@ def ci_check(root, branch, base, title, body, message, timeout):
 
 
 def cmd_code(args):
+    set_stall(args)
     root = os.path.abspath(args.dir)
     task = sys.stdin.read() if args.task == "-" else args.task
     if args.task_file:
@@ -684,17 +984,28 @@ def cmd_code(args):
     title = (task or "").strip().splitlines()[0].lstrip("# ")[:70] if task else "Offloaded change"
     spec = open(AP_MD).read()
     history = ""
+    lim = max_context(getattr(args, "max_context", None))
+    t0, last_reason, last_detail = time.time(), None, ""
+    dctx = {"command": " ".join(sys.argv), "model_requested": args.model, "t0": t0}
     for rnd in range(1, args.rounds + 1):
-        ctx = combine_tree(root, args.paths)
-        prompt = (f"<ap_spec>\n{spec}\n</ap_spec>\n\n<codebase>\n{ctx}\n</codebase>\n\n"
+        items = pack_tree(root, args.paths)
+        tree = render_tree(items)
+        RUN["files"] = dctx["files"] = len(items)
+        dctx["prompt_chars"] = len(tree) + len(task or "")
+        log(f"context: {len(items)} files, {len(tree) + len(task or '')} chars")
+        if len(tree) + len(task or "") > lim:
+            context_fail(ContextTooLarge(len(tree) + len(task or ""), lim, [(f, len(b)) for f, b in items],
+                                         len(items)), "code", dctx)
+        prompt = (f"<ap_spec>\n{spec}\n</ap_spec>\n\n<codebase>\n{tree}\n</codebase>\n\n"
                   f"{CODE_RULES}\n\nTASK:\n{task}\n{history}")
         log(f"round {rnd}: asking {args.model} ({len(prompt)} chars of context)")
         ans = ask_many([(prompt, args.model, None)])[0]
         if isinstance(ans, Exception):
-            sys.exit(f"ERROR: {ans}")
+            fail_exit(ans)
         patch = extract_patch(ans)
         if looks_like_diff(patch):
             log(f"round {rnd}: the model answered with a unified diff, which is forbidden")
+            last_reason, last_detail = "PATCH_FAILED", "the model answered with a unified diff"
             history = ("\nYOUR PREVIOUS ANSWER WAS A UNIFIED DIFF. Diffs are forbidden: the line counts in "
                        "their headers are always wrong. Nothing was applied. Answer ONLY in the 'ap' "
                        "format from the spec above, inside one ```ap block.")
@@ -713,6 +1024,7 @@ def cmd_code(args):
         if ap.returncode != 0:
             err = (ap.stdout + ap.stderr)[-3000:]
             log(f"round {rnd}: patch not (fully) applied:\n{err}")
+            last_reason, last_detail = "PATCH_FAILED", err
             brief = os.path.join(root, "afailed.md")
             if os.path.exists(brief):
                 history = ("\nYOUR PREVIOUS PATCH WAS ONLY PARTLY APPLIED by the ap patcher (the codebase "
@@ -738,6 +1050,7 @@ def cmd_code(args):
                 print(ans)
                 return
             log(f"round {rnd}: CI failed:\n{out[-1500:]}")
+            last_reason, last_detail = "TESTS_FAILED", out
             history = (f"\nA previous patch WAS APPLIED (the codebase above already contains it) but "
                        f"the CI checks failed:\n{out}\nSend a patch that fixes it.")
             continue
@@ -752,15 +1065,18 @@ def cmd_code(args):
             return
         out = failure_excerpt(t.stdout + t.stderr)
         log(f"round {rnd}: tests failed:\n{out[-1500:]}")
+        last_reason, last_detail = "TESTS_FAILED", out
         history = (f"\nA previous patch WAS APPLIED (the codebase above already contains it) but "
                    f"the test command `{args.test}` failed:\n{out}\nSend a patch that fixes it.")
-    sys.exit(f"FAILED after {args.rounds} rounds")
+    e = RuntimeError(f"FAILED after {args.rounds} rounds ({last_reason or 'UNKNOWN'}): {_oneline(last_detail, 200)}")
+    attach_diag(e, dctx, reason=last_reason or "UNKNOWN", detail=last_detail)
+    fail_exit(e)
 
 
 
 # ---------------------------------------------------------------- router gate
 
-ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve")
+ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag")
 ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py", "mistral-chat", "mistral_chat.py",
                    "deepseek-chat", "deepseek_chat.py")
 
@@ -799,6 +1115,128 @@ def check_router_command(cmd):
     return None
 
 
+MANAGER_TASK_WRITE = ("task*.md", "*.task.md")
+_SEPS = set(";&|\n()")
+_INTERPRETERS = {"bash", "sh", "zsh", "dash"}
+
+
+def _tmp_ok(path):
+    """Redirect targets a manager may write: /dev/null and scratch logs under /tmp."""
+    if path == "/dev/null":
+        return True
+    return path.startswith("/tmp/") and ("/work/" in path or "/logs" in path or path.endswith((".out", ".log")))
+
+
+def _manager_tokens(cmd):
+    import shlex
+    lx = shlex.shlex(cmd, posix=True, punctuation_chars=";<>|&()\n")
+    lx.whitespace = " \t\r"
+    lx.whitespace_split = True
+    lx.commenters = ""
+    return list(lx)
+
+
+def _check_manager_segment(argv):
+    """argv of one simple command (redirects already removed) -> reason or None."""
+    while argv and ("=" in argv[0] and argv[0].split("=")[0].replace("_", "a").isalnum()
+                    or os.path.basename(argv[0]) in ("sudo", "env", "time", "nohup", "command", "exec")):
+        argv = argv[1:]
+    if not argv:
+        return None
+    name, args = os.path.basename(argv[0]), argv[1:]
+    import re
+    if name == "eval":
+        return "eval of a string is not allowed"
+    if name in _INTERPRETERS and "-c" in args[:3]:
+        i = args.index("-c")
+        if i + 1 < len(args):
+            return check_manager_command(args[i + 1]) or None
+        return None
+    if re.fullmatch(r"python[\d.]*|pypy3?", name):
+        for a in args:
+            if a == "-":
+                return "python reading a script from stdin (`python3 -`) is not allowed"
+            if a == "-m" or not a.startswith("-"):
+                return None  # module or a script file
+            if not a.startswith("--") and "c" in a[1:]:
+                return "inline python (`python3 -c`) is not allowed"
+        return "python without a script file (stdin/inline code) is not allowed"
+    if name in ("node", "nodejs", "ruby", "php") and any(a in ("-e", "-p", "--eval", "-r", "-E") for a in args):
+        return f"inline code (`{name} -e`) is not allowed"
+    if name == "sed" and any(a == "--in-place" or a.startswith("--in-place=") or
+                             (a.startswith("-") and not a.startswith("--") and "i" in a[1:]) for a in args):
+        return "`sed -i` edits files in place"
+    if name == "perl" and any(a.startswith("-") and not a.startswith("--") and ("i" in a[1:] or "e" in a[1:] or "E" in a[1:])
+                              for a in args):
+        return "`perl -i/-e` is not allowed"
+    if name in ("awk", "gawk", "mawk") and any(re.search(r"print[^;}]*>|system\s*\(", a) for a in args):
+        return "awk writing to files / running commands is not allowed"
+    if name == "tee" and any(not a.startswith("-") and not _tmp_ok(a) for a in args):
+        return "`tee` writes files"
+    if name in ("patch", "ap", "ap.py"):
+        return "patches must be applied inside `code` (the router applies them), not by the manager"
+    if name == "git":
+        sub = next((a for a in args if not a.startswith("-")), "")
+        if sub == "apply":
+            return "`git apply`: patch application must happen inside `aistudio code`"
+    if name == "gh":
+        for i, a in enumerate(args):
+            if a in ("--body", "-b") or a.startswith("--body="):
+                return "`gh ... --body` with an inline text (use --body-file)"
+            if name == "gh" and args[:1] == ["api"] and a in ("-f", "--raw-field", "-F", "--field") \
+                    and i + 1 < len(args) and args[i + 1].startswith("body="):
+                return "`gh api -f body=...` with an inline text"
+            if a.startswith(("--field=body=", "--raw-field=body=")):
+                return "`gh api --field body=...` with an inline text"
+    return None
+
+
+def check_manager_command(cmd):
+    """Reason a Bash command is forbidden for the manager, or None."""
+    try:
+        toks = _manager_tokens(cmd)
+    except ValueError:
+        toks = cmd.split()
+    seg, i = [], 0
+    while i <= len(toks):
+        t = toks[i] if i < len(toks) else None
+        if t is None or (t and set(t) <= _SEPS):
+            why = _check_manager_segment(seg)
+            if why:
+                return why
+            seg = []
+        elif t.startswith("<<"):
+            return "heredocs / here-strings are not allowed"
+        elif t and set(t) <= set("<>&|") and ">" in t:
+            target = toks[i + 1] if i + 1 < len(toks) else ""
+            i += 1
+            if t.endswith("&") and (target.isdigit() or target == "-"):
+                pass  # fd duplication: 2>&1, >&2
+            elif not _tmp_ok(target):
+                return f"output redirection to {target or '?'} writes a file"
+        else:
+            seg.append(t)
+        i += 1
+    return None
+
+
+def check_manager_tool(tool, tool_input):
+    """Orchestrator gate for a small manager model: None if the tool call is allowed, else why not."""
+    import fnmatch
+    tool_input = tool_input or {}
+    if tool in ("Edit", "MultiEdit", "NotebookEdit"):
+        return f"{tool} is forbidden"
+    if tool == "Write":
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
+        base = os.path.basename(path)
+        if any(fnmatch.fnmatch(base, g) for g in MANAGER_TASK_WRITE) or "tasks" in path.split(os.sep)[:-1]:
+            return None
+        return f"Write to {path or '?'} is forbidden (only task descriptions: task*.md, *.task.md, tasks/)"
+    if tool == "Bash":
+        return check_manager_command(tool_input.get("command", ""))
+    return None
+
+
 def cmd_guard(args):
     """PreToolUse hook (Claude Code JSON on stdin). Exit 2 blocks the tool call."""
     try:
@@ -807,6 +1245,14 @@ def cmd_guard(args):
         print("router gate: bad hook input", file=sys.stderr)
         sys.exit(2)
     tool = ev.get("tool_name", "")
+    if getattr(args, "manager", False):
+        why = check_manager_tool(tool, ev.get("tool_input"))
+        if why:
+            print(f"MANAGER GATE: {why}. You orchestrate only: give substantive work (code, analysis, "
+                  "triage, texts, markdown edits) to a router subagent (gemini-router / mistral-router) "
+                  "via a task file.", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
     if tool != "Bash":
         print(f"ROUTER GATE: tool {tool} is forbidden. You are a router: only run "
               "`aistudio ...` commands; Gemini does all thinking and writing.", file=sys.stderr)
@@ -814,10 +1260,23 @@ def cmd_guard(args):
     why = check_router_command((ev.get("tool_input") or {}).get("command", ""))
     if why:
         print(f"ROUTER GATE: {why}. You are a router, not a worker: run exactly one "
-              "`aistudio ask|code|batch|status` command per call and pass the task verbatim.",
+              "`aistudio ask|code|batch|status|diag` command per call and pass the task verbatim.",
               file=sys.stderr)
         sys.exit(2)
     sys.exit(0)
+
+
+def cmd_diag(args):
+    """Print the summary.txt of the last N failure bundles."""
+    base = os.path.join(HOME, "diag")
+    dirs = sorted(d for d in (os.listdir(base) if os.path.isdir(base) else [])
+                  if os.path.isfile(os.path.join(base, d, "summary.txt")))
+    if not dirs:
+        print(f"no diagnostics in {base}")
+        return
+    for d in dirs[-max(1, args.n):]:
+        print(f"== {os.path.join(base, d)}")
+        print(open(os.path.join(base, d, "summary.txt"), encoding="utf-8", errors="replace").read())
 
 
 def cmd_status(args):
@@ -890,7 +1349,9 @@ def main():
     s = sub.add_parser("export-cookies"); s.set_defaults(fn=cmd_export_cookies)
     s = sub.add_parser("ask"); s.add_argument("prompt"); s.add_argument("-f", "--file", action="append")
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.add_argument("-s", "--system")
-    s.add_argument("-o", "--out"); s.set_defaults(fn=cmd_ask)
+    s.add_argument("-o", "--out"); s.add_argument("--max-context", type=int, help="max chars of packed context "
+                   "(default $OFFLOAD_MAX_CONTEXT or 400000)")
+    s.add_argument("--stall", type=float, help="seconds without output growth = STALLED (default 180)"); s.set_defaults(fn=cmd_ask)
     s = sub.add_parser("serve", help="keep a warm Chrome running"); s.set_defaults(fn=cmd_serve)
     s = sub.add_parser("stop", help="stop the warm Chrome"); s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
@@ -898,6 +1359,9 @@ def main():
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
     s.add_argument("task", nargs="?", default="", help="task text or - for stdin"); s.add_argument("--task-file")
     s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="*")
+    s.add_argument("--stall", type=float, help="seconds without output growth = STALLED (default 180)")
+    s.add_argument("--max-context", type=int, help="max chars of packed context (default "
+                   "$OFFLOAD_MAX_CONTEXT or 400000); over the limit -> exit 3, nothing is truncated")
     s.add_argument("-t", "--test", help="shell command that must pass")
     s.add_argument("--ci", action="store_true",
                    help="test in GitHub Actions: push a branch + draft PR, wait for checks")
@@ -906,8 +1370,11 @@ def main():
     s.add_argument("--test-timeout", type=int, default=1800)
     s.add_argument("-r", "--rounds", type=int, default=3)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
-    s = sub.add_parser("guard", help="PreToolUse hook that gates router models")
+    s = sub.add_parser("guard", help="PreToolUse hook that gates router models (--manager: orchestrator gate)")
+    s.add_argument("--manager", action="store_true", help="gate for a manager that must offload all work")
     s.set_defaults(fn=cmd_guard)
+    s = sub.add_parser("diag", help="print the last N failure diagnostics summaries")
+    s.add_argument("n", nargs="?", type=int, default=1); s.set_defaults(fn=cmd_diag)
     s = sub.add_parser("status"); s.set_defaults(fn=cmd_status)
     a = p.parse_args()
     if a.cmd in ("ask", "code", "batch"):
