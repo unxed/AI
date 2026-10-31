@@ -45,6 +45,17 @@ into the prompt, Gemini answers with an `ap` patch, it is applied, the test comm
 runs, and failures (patch or tests) go back to Gemini for up to `-r 4` rounds.
 Exit 0 = applied and tests pass. Then review `git diff` and commit.
 
+**Small cloud VMs (< 2 GB RAM, e.g. GCP e2-micro): never build or test locally.** Use
+`--ci` instead of `-t`: each round's patch is committed to a branch (`--ci-branch`,
+default `offload/<timestamp>`), pushed, a **draft PR** is opened against `--ci-base`
+(default `main`; most workflows run on `pull_request`) and the GitHub Actions runs of
+that commit are awaited; failed-step logs go back to the model. Needs `gh auth login`.
+`code -t` refuses to run on such machines (override: `OFFLOAD_ALLOW_LOCAL_BUILD=1`).
+
+```bash
+aistudio code --task-file task.md -C ~/repo --ci --ci-branch fix/issue-42
+```
+
 ## 2. Anything else
 
 ```bash

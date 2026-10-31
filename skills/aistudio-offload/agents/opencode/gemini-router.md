@@ -1,6 +1,6 @@
 ---
 description: Cheap router that forwards a task to Google Gemini via the AI Studio chat UI (headless browser) and reports the result. It cannot read or write code itself; Gemini is the worker.
-mode: subagent
+mode: all
 temperature: 0
 tools:
   write: false

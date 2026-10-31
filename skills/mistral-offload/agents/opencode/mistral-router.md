@@ -1,6 +1,6 @@
 ---
 description: Cheap router that forwards a task to Mistral Le Chat (headless browser) and reports the result. It cannot read or write code itself; Mistral is the worker.
-mode: subagent
+mode: all
 temperature: 0
 tools:
   write: false

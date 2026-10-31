@@ -39,6 +39,17 @@ install to `~/.claude/agents/`) and `agents/opencode/grok-router.md` (opencode: 
 only for `grok …`). The gate blocks anything except a single `grok ask|code|batch|status|serve`
 command — no chaining, redirects, substitutions or file writes.
 
+**Small cloud VMs (< 2 GB RAM, e.g. GCP e2-micro): never build or test locally.** Use
+`--ci` instead of `-t`: each round's patch is committed to a branch (`--ci-branch`,
+default `offload/<timestamp>`), pushed, a **draft PR** is opened against `--ci-base`
+(default `main`; most workflows run on `pull_request`) and the GitHub Actions runs of
+that commit are awaited; failed-step logs go back to the model. Needs `gh auth login`.
+`code -t` refuses to run on such machines (override: `OFFLOAD_ALLOW_LOCAL_BUILD=1`).
+
+```bash
+grok code --task-file task.md -C ~/repo --ci --ci-branch fix/issue-42
+```
+
 ## Vendor chain (hard rule)
 
 A vendor never offloads to itself, directly or anywhere up a chain (no Gemini planning work

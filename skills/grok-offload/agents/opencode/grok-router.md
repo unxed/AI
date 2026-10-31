@@ -1,6 +1,6 @@
 ---
 description: Cheap router that forwards a task to Grok on X (headless browser) and reports the result. It cannot read or write code itself; Grok is the worker.
-mode: subagent
+mode: all
 temperature: 0
 tools:
   write: false

@@ -25,3 +25,9 @@ def test_blocked():
 def test_extract_patch():
     assert extract_patch("intro\n```ap\nX\n```\nbye") == "X\n"
     assert extract_patch("raw patch") == "raw patch"
+
+
+def test_small_machine_override(monkeypatch):
+    import offload_core
+    monkeypatch.setenv("OFFLOAD_ALLOW_LOCAL_BUILD", "1")
+    assert offload_core._small_machine() is False

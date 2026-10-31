@@ -310,12 +310,19 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
                                 system))
             tab.key("Escape")
         tab.c.eval(JS_HOOK)
-        tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)
+        # Real browser input (CDP Input.*) instead of JS-set values and el.click(): the page
+        # gets the same trusted events a user's paste and click produce.
+        tab.c.eval(f"{JS_BOX}.focus()")
+        tab.insert_text(prompt)
+        if tab.c.eval(f"{JS_BOX}.value.length") < len(prompt.strip()) // 2:
+            tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)  # fallback
         tab.wait_js(f"{JS_RUN} && !{JS_RUN}.disabled", timeout=60)
         started = False
         for _ in range(3):  # a dialog may swallow the first click
             tab.c.eval(JS_CLOSE_DIALOGS)
-            tab.c.eval(f"{JS_RUN}.click()")
+            x, y = tab.c.eval(f"(()=>{{const r={JS_RUN}.getBoundingClientRect();"
+                              " return [r.x+r.width/2, r.y+r.height/2];}})()")
+            tab.click(x, y)
             try:
                 tab.wait_js("window.__ofl && window.__ofl.n > 0", timeout=20)
                 started = True
@@ -556,11 +563,67 @@ def extract_patch(ans):
     return ans
 
 
+def _small_machine():
+    """True on tiny VMs (< 2 GB RAM, e.g. GCP e2-micro): no local builds/tests there."""
+    try:
+        kb = int(open("/proc/meminfo").read().split("MemTotal:")[1].split()[0])
+    except Exception:
+        return False
+    return kb < 2_000_000 and os.environ.get("OFFLOAD_ALLOW_LOCAL_BUILD") != "1"
+
+
+def _run(root, *cmd, check=True):
+    r = subprocess.run(list(cmd), cwd=root, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])}: {(r.stderr or r.stdout).strip()[-500:]}")
+    return r.stdout.strip()
+
+
+def ci_check(root, branch, base, title, body, message, timeout):
+    """Commit the working tree to `branch`, push it, make sure a draft PR exists (CI
+    usually runs on pull_request) and wait for the GitHub Actions runs of that commit.
+    Returns (passed, failure_log)."""
+    if _run(root, "git", "rev-parse", "--abbrev-ref", "HEAD") != branch:
+        _run(root, "git", "checkout", "-B", branch)
+    _run(root, "git", "add", "-A")
+    _run(root, "git", "commit", "-q", "-m", message, check=False)
+    _run(root, "git", "push", "-q", "-f", "-u", "origin", branch)
+    url = _run(root, "gh", "pr", "view", branch, "--json", "url", "-q", ".url", check=False)
+    if not url:
+        url = _run(root, "gh", "pr", "create", "--draft", "--base", base, "--head", branch,
+                   "--title", title, "--body", body)
+    sha = _run(root, "git", "rev-parse", "HEAD")
+    log(f"CI: pushed {sha[:8]} to {branch} ({url}); waiting for checks")
+    deadline, seen = time.time() + timeout, 0
+    while time.time() < deadline:
+        time.sleep(30)
+        runs = json.loads(_run(root, "gh", "run", "list", "--commit", sha, "--json",
+                               "databaseId,status,conclusion,name", check=False) or "[]")
+        if not runs:
+            seen += 1
+            if seen > 20:
+                return False, "No GitHub Actions run started for this commit (no CI configured?)."
+            continue
+        if all(r["status"] == "completed" for r in runs):
+            bad = [r for r in runs if r["conclusion"] not in ("success", "skipped", "neutral")]
+            if not bad:
+                return True, ""
+            out = "\n".join(_run(root, "gh", "run", "view", str(r["databaseId"]), "--log-failed",
+                                 check=False)[-6000:] for r in bad)
+            return False, out[-8000:]
+    return False, f"CI did not finish within {timeout}s"
+
+
 def cmd_code(args):
     root = os.path.abspath(args.dir)
     task = sys.stdin.read() if args.task == "-" else args.task
     if args.task_file:
         task = open(args.task_file).read() + "\n" + (task or "")
+    if args.test and not args.ci and _small_machine():
+        sys.exit("ERROR: this machine has < 2 GB RAM: builds/tests must not run here. Use --ci "
+                 "(GitHub Actions on a draft PR) instead of -t, or set OFFLOAD_ALLOW_LOCAL_BUILD=1.")
+    branch = args.ci_branch or f"offload/{time.strftime('%Y%m%d-%H%M%S')}"
+    title = (task or "").strip().splitlines()[0].lstrip("# ")[:70] if task else "Offloaded change"
     spec = open(AP_MD).read()
     history = ""
     for rnd in range(1, args.rounds + 1):
@@ -584,6 +647,18 @@ def cmd_code(args):
             continue
         os.remove(pfile)
         log(f"round {rnd}: patch applied")
+        if args.ci:
+            ok, out = ci_check(root, branch, args.ci_base, title, args.ci_body or
+                               f"Draft opened by `{PROG} code --ci`; CI is the test runner.",
+                               f"{title} (round {rnd})", args.test_timeout)
+            if ok:
+                log(f"round {rnd}: CI passed on {branch}")
+                print(ans)
+                return
+            log(f"round {rnd}: CI failed:\n{out[-1500:]}")
+            history = (f"\nA previous patch WAS APPLIED (the codebase above already contains it) but "
+                       f"the CI checks failed:\n{out}\nSend a patch that fixes it.")
+            continue
         if not args.test:
             print(ans)
             return
@@ -739,10 +814,14 @@ def main():
     s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
-    s.add_argument("task", help="task text or - for stdin"); s.add_argument("--task-file")
+    s.add_argument("task", nargs="?", default="", help="task text or - for stdin"); s.add_argument("--task-file")
     s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="*")
     s.add_argument("-t", "--test", help="shell command that must pass")
-    s.add_argument("--test-timeout", type=int, default=900)
+    s.add_argument("--ci", action="store_true",
+                   help="test in GitHub Actions: push a branch + draft PR, wait for checks")
+    s.add_argument("--ci-branch"); s.add_argument("--ci-base", default="main")
+    s.add_argument("--ci-body", help="draft PR description")
+    s.add_argument("--test-timeout", type=int, default=1800)
     s.add_argument("-r", "--rounds", type=int, default=4)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
     s = sub.add_parser("guard", help="PreToolUse hook that gates router models")

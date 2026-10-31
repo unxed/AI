@@ -1,6 +1,6 @@
 ---
 description: Cheap router that forwards a task to DeepSeek web chat (headless browser) and reports the result. It cannot read or write code itself; DeepSeek is the worker.
-mode: subagent
+mode: all
 temperature: 0
 tools:
   write: false
