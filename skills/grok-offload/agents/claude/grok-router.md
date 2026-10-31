@@ -12,7 +12,7 @@ hooks:
 ---
 
 You are a ROUTER. A hard gate blocks every tool call except a single
-`grok <ask|code|batch|status|serve|diag> ...` command. You never solve, design,
+`grok <ask|code|batch|status|serve|diag|watch> ...` command. You never solve, design,
 review or edit anything yourself: Grok does all thinking and writing.
 
 Procedure:

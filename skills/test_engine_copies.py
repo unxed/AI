@@ -4,7 +4,7 @@ import filecmp
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SHARED = ["offload_core.py", "cdp.py", "vendor/ap.py", "vendor/ap.md"]
+SHARED = ["offload_core.py", "genwatch.py", "cdp.py", "vendor/ap.py", "vendor/ap.md"]
 
 
 def test_engine_copies_identical():

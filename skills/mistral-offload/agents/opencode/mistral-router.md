@@ -22,6 +22,8 @@ permission:
     "mistral-chat code *": allow
     "mistral-chat batch *": allow
     "mistral-chat status": allow
+    "mistral-chat status --runs": allow
+    "mistral-chat watch*": allow
     "OFFLOAD_CALLER=* mistral-chat ask *": allow
     "OFFLOAD_CALLER=* mistral-chat code *": allow
     "OFFLOAD_CALLER=* mistral-chat batch *": allow

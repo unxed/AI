@@ -174,5 +174,59 @@ it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
   `screenshot.jpg`, `alerts.txt`) and prints `DIAG <REASON> <dir>: <message>`. Reasons: STALLED QUOTA RATE_LIMIT
   PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED
   UNKNOWN. `aistudio diag [N]` prints the last N summaries (routers may run it).
-- **Stall watchdog** (AI Studio engine): progress is logged every 30 s; no output growth for 180 s
-  (`OFFLOAD_STALL_SECONDS` / `--stall`) = STALLED, a bundle is saved and the request is retried in a fresh tab.
+
+## Generation control (never wait silently)
+
+Every model request is watched. While it runs, stderr gets a heartbeat line every 15 s
+(`--heartbeat N` / `OFFLOAD_HEARTBEAT_SECONDS`):
+
+```
+[aistudio] waiting: model=gemini-3.1-pro-preview, elapsed=95s, answer_chars=1200 (+300), state=generating
+```
+
+`state` = `generating` (output growing or the page shows the Stop indicator / an open answering request),
+`idle` (neither), `error` (an error is shown in the UI), `preparing` (before the run: page load, model
+selection, typing a long prompt; the line then ends with `phase=...`). Providers other than AI Studio get the
+heartbeat (with `phase=`), the status file and the retry rules, but not the page-level stop criteria below.
+
+**Is the generation alive? One command** (needs no login, no browser; routers may run it):
+
+```bash
+aistudio status --runs      # one line per run: pid, model, attempt, state, answer_chars, silent_for, health
+aistudio status --runs --json
+aistudio watch -i 10        # repeats it until every run has finished
+```
+
+The data is `~/.offload-browser/run-<pid>.json` (no secrets; pid, model, attempt, state, answer_chars,
+last_progress_ts, per-job list), refreshed every ~5 s by a thread independent of the browser loop;
+finished runs stay listed for 10 min and the files are pruned after 24 h.
+`health`: `ok`, `finished`/`failed` (final), `DEAD` (the process is gone but the run was active),
+`HUNG` (status not refreshed for 30 s: the process is frozen), `SILENT` (no output growth and no generation
+indicator for longer than the stall window), `error`. **Exit code 0 = nothing wrong, 2 = some run is
+DEAD/HUNG/SILENT/error** (`watch` also stops with 2 as soon as that happens). `state=between` = no request in
+flight (retry pause, patch apply, tests).
+
+Stop criteria (AI Studio engine), each ends the attempt at once with the reason on stderr:
+
+- **error in the UI** (banner/toast/model turn: Permission denied, rate limit, quota, Something went wrong,
+  Failed to generate...) seen on two consecutive probes: attempt failed with that text, no waiting for the timeout;
+- **stall**: no output growth AND no generation indicator for 120 s (`--stall N` / `OFFLOAD_STALL_SECONDS`):
+  `STALLED`, a diag bundle is saved, retry in a fresh tab. A model that is visibly "thinking" (Stop indicator)
+  is not stalled, however quiet; the heartbeat shows `(+0)` meanwhile;
+- the indicator vanished with no output for 20 s: `Empty answer`; sign-in page or a foreign URL: `Session expired`
+  (not retried; `login` again);
+- **attempt timeout** 900 s (`--attempt-timeout N` / `OFFLOAD_ATTEMPT_TIMEOUT`).
+
+Retries (3 attempts, each next one on the next model of the fallback chain) log
+`<model>: attempt N failed (<kind>): <text>; retrying in Ns with <next model>`. Pauses: Permission denied
+30 s x N, rate limit 20 s x N, quota 5 s (quota is per model), others 5 s x N. A model that answered
+Permission denied is never tried again: if no other model is left the command stops at once. When nothing
+works the exit code is non-zero and the **last stderr line** is `DIAG <REASON> <dir>: <text> [attempts: <model>:
+<kind>; ...]`.
+
+**Rule for routers and orchestrators: do not wait silently, do not kill by guess.** While the command runs,
+heartbeat lines must keep coming (or `aistudio status --runs` shows `health=ok`). No heartbeat and no status refresh
+for longer than the stall window (120 s by default) = the run is dead: treat it as failed, report
+`aistudio status --runs` plus `aistudio diag`, and retry with another `-m` or hand the failure back; never poll the
+browser yourself and never kill other `aistudio` processes (they may belong to another agent).
+

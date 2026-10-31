@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cdp import Chrome, _port_open  # noqa: E402
+import genwatch  # noqa: E402
 
 # One Chrome profile shared by all *-offload skills: a single Google sign-in also covers
 # "Sign in with Google" on Mistral/DeepSeek, and all skills reuse one running Chrome.
@@ -298,16 +299,43 @@ def select_model(tab, model):
                 timeout=20)
 
 
-STALL_SECONDS = float(os.environ.get("OFFLOAD_STALL_SECONDS") or 180)
-PROGRESS_LOG_EVERY = 30
+STALL_SECONDS = float(os.environ.get("OFFLOAD_STALL_SECONDS") or 120)
+HEARTBEAT_SECONDS = float(os.environ.get("OFFLOAD_HEARTBEAT_SECONDS") or 15)
+ATTEMPT_TIMEOUT = float(os.environ.get("OFFLOAD_ATTEMPT_TIMEOUT") or 900)
+# One probe of the page: stream state, error in the model turn or in a banner/toast, the
+# generation indicator (Stop button, or the request is open and answering), current URL.
 JS_GEN_STATE = """(()=>{const o=window.__ofl||{}; const txt=o.text||''; let done=!!o.done;
   if(!done){try{JSON.parse(txt); done=txt.length>0}catch(e){}}
   const t=[...document.querySelectorAll('ms-chat-turn')].pop();
   const e=t&&t.querySelector('[class*=error]'); const err=e&&e.innerText.trim()?e.innerText.trim():'';
+  const al=[...document.querySelectorAll('ms-callout, [role=alert], mat-snack-bar-container, simple-snack-bar, '+
+    '[class*=snack], [class*=toast]')].map(x=>(x.innerText||'').trim()).filter(Boolean).slice(0,5);
   const rb=document.querySelector('ms-run-button');
-  return {done, err, n:txt.length, turn:t?(t.innerText||'').length:0,
+  return {done, err, alerts:al, url:location.href, n:txt.length, turn:t?(t.innerText||'').length:0,
           busy:!!(rb&&/stop/i.test((rb.innerText||'')+(rb.getAttribute('aria-label')||'')))
-              || !!document.querySelector('button[aria-label*="Stop" i]')};})()"""
+              || !!document.querySelector('button[aria-label*="Stop" i]')
+              || (!!o.n && !o.done && o.status===200)};})()"""
+
+
+class _NoRuns:
+    """Stand-in until ask_many starts a genwatch.Runs registry."""
+    def phase(self, *a, **k): pass
+    def progress(self, *a, **k): pass
+
+
+RUNS = _NoRuns()
+
+
+def get_runs():
+    """The process-wide registry (heartbeat + run-<pid>.json), started on first use and kept
+    until exit: between requests (patching, tests, retry pauses) the file says `between`."""
+    global RUNS
+    if not isinstance(RUNS, genwatch.Runs) or RUNS.home != HOME or RUNS.closed:
+        if isinstance(RUNS, genwatch.Runs):
+            RUNS.stop()
+        RUNS = genwatch.Runs(HOME, log, HEARTBEAT_SECONDS, PROG)
+        RUNS.start()
+    return RUNS
 
 
 class StallError(RuntimeError):
@@ -322,42 +350,55 @@ def stall_decision(size, last_size, last_change, now, stall_s):
     return last_size, last_change, (now - last_change) >= stall_s
 
 
-def wait_generation(tab, timeout, stall_s=None):
-    """Wait for the answer; returns 'DONE' or 'ERR:<text>'. Logs progress every 30 s and raises
-    StallError when the output does not grow for the stall window (default 180 s)."""
+def wait_generation(tab, timeout, stall_s=None, att=None, clock=time.time):
+    """Wait for the answer; returns 'DONE' or 'ERR:<text>'. Every probe (about 1 s) feeds the
+    heartbeat/status of the current attempt (genwatch). Ends early, with the reason, on:
+    an error in the UI (banner, toast, model turn: seen twice in a row), a sign-in page,
+    no output growth AND no generation indicator for the stall window (StallError), the
+    indicator vanishing without any output, or the attempt timeout."""
     stall_s = stall_s or STALL_SECONDS
-    start = time.time()
-    last_size, last_change, last_log, seen_busy, gone_since = 0, start, start, False, None
+    att = att or genwatch.current()
+    start = clock()
+    last_size, last_change, seen_busy, gone_since, err_n, err_prev = 0, start, False, None, 0, ""
     while True:
-        now = time.time()
+        now = clock()
         if now - start > timeout:
-            raise TimeoutError("timeout waiting for the answer (window.__ofl)")
+            raise TimeoutError(f"timeout waiting for the answer after {int(now - start)}s (window.__ofl)")
         try:
             st = tab.c.eval(JS_GEN_STATE, timeout=20) or {}
         except RuntimeError:
             st = {}
+        url = st.get("url") or ""
+        if url and ("//accounts." in url or "aistudio.google.com" not in url):
+            raise RuntimeError(f"Session expired or wrong page ({url[:80]}): run `{PROG} login` again.")
+        size = max(st.get("n", 0), st.get("turn", 0))
+        busy = bool(st.get("busy"))
+        err = st.get("err") or genwatch.ui_error(st.get("alerts"))
+        if att:
+            RUNS.progress(att, size, busy, err)
         if st.get("done"):
             return "DONE"
-        if st.get("err"):
-            return "ERR:" + st["err"]
-        size = max(st.get("n", 0), st.get("turn", 0))
+        err_n, err_prev = (err_n + 1 if err and err == err_prev else 1 if err else 0), err
+        if err_n >= 2:
+            return "ERR:" + err
+        if busy:
+            last_change = now  # the page says it is generating: not a stall, however quiet
         last_size, last_change, stalled = stall_decision(size, last_size, last_change, now, stall_s)
-        if now - last_log >= PROGRESS_LOG_EVERY:
-            log(f"generating: {size} chars, {int(now - start)}s")
-            last_log = now
-        if st.get("busy"):
+        if busy:
             seen_busy, gone_since = True, None
         elif seen_busy and size == 0:
             gone_since = gone_since or now
             if now - gone_since >= 20:
                 raise RuntimeError("Empty answer: the generation indicator disappeared with no response")
         if stalled:
-            raise StallError(f"STALLED: no output growth for {int(now - last_change)}s "
-                             f"(size {size} chars, {int(now - start)}s since start)")
+            raise StallError(f"STALLED: no output growth and no generation indicator for "
+                             f"{int(now - last_change)}s (size {size} chars, {int(now - start)}s since start)")
         tab.c.pump(1.0)
 
 
-def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
+def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=None):
+    timeout = timeout or ATTEMPT_TIMEOUT
+    RUNS.phase("loading page")
     tab = ch.new_tab(f"{BASE}/prompts/new_chat")
     try:
         tab.wait_js(f"!!{JS_BOX} || location.host.startsWith('accounts.')", timeout=90)
@@ -365,6 +406,7 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
             raise RuntimeError("Session expired: run `aistudio login` again.")
         time.sleep(1.5)  # late announcement/upsell dialogs
         tab.c.eval(JS_CLOSE_DIALOGS)
+        RUNS.phase("selecting model")
         select_model(tab, model)
         if system:
             tab.c.eval("""(()=>{const b=[...document.querySelectorAll('button')].find(b=>
@@ -375,6 +417,7 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
                                 system))
             tab.key("Escape")
         tab.c.eval(JS_HOOK)
+        RUNS.phase("typing prompt")
         # Real browser input (CDP Input.*) instead of JS-set values and el.click(): the page
         # gets the same trusted events a user's paste and click produce.
         # (multi-line Input.insertText is slow - ~1 min per 100k chars - so a long prompt
@@ -387,6 +430,7 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
         if tab.c.eval(f"{JS_BOX}.value.length") < len(prompt.strip()) // 2:
             tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)  # fallback
         tab.wait_js(f"{JS_RUN} && !{JS_RUN}.disabled", timeout=60)
+        RUNS.phase("starting run")
         started = False
         for _ in range(3):  # a dialog may swallow the first click
             tab.c.eval(JS_CLOSE_DIALOGS)
@@ -700,13 +744,15 @@ def choose_model(ch, prompt):
 
 def ask_many(jobs, jobs_n=3, retries=2):
     """jobs: list of (prompt, model, system). Returns list of text or Exception.
-    Runs up to jobs_n tabs in parallel in one Chrome."""
+    Runs up to jobs_n tabs in parallel in one Chrome. Every attempt is watched: heartbeat on
+    stderr, status file run-<pid>.json (see genwatch), early stop on UI errors and stalls."""
     ch = open_chrome()
     owned = ch.proc is not None  # we started it -> we stop it
+    runs = get_runs()
 
     dch = _DiagChrome(ch)
 
-    def one(job):
+    def one(job, jid=0):
         prompt, model, system = job
         model = model or DEFAULT_MODEL
         ctx = {"command": " ".join(sys.argv), "model_requested": model, "prompt_chars": len(prompt),
@@ -714,29 +760,46 @@ def ask_many(jobs, jobs_n=3, retries=2):
         if model == "auto" and is_gemini():  # Gemini only; Grok has its own auto
             model = choose_model(ch, prompt)
         chain = [model] + FALLBACK.get(model, [])
+        denied, trail = set(), []
         for attempt in range(retries + 1):
             m = chain[min(attempt, len(chain) - 1)]
             _tls.snap = None
+            att = runs.begin(m, attempt + 1, jid)
+            genwatch.bind(att)
             try:
                 out = globals()["ask_tab"](dch, prompt, m, system)
+                runs.end(att, "done")
                 log(f"answered by {m}")  # may be a fallback model: name it in reports/PRs
                 return out
             except Exception as e:
-                if attempt == retries or "login" in str(e):
+                runs.end(att, "failed", e or type(e).__name__)
+                pause, kind = genwatch.retry_pause(e, attempt + 1)
+                trail.append(f"{m}: {kind}")
+                if kind == "permission denied":
+                    denied.add(m)
+                nxt = chain[min(attempt + 1, len(chain) - 1)]
+                no_model = nxt in denied  # never repeat a model that answered Permission denied
+                if attempt == retries or "login" in str(e) or no_model:
                     ctx["model_selected"] = m
-                    return attach_diag(e, ctx, getattr(_tls, "snap", None))
+                    r = attach_diag(e, ctx, getattr(_tls, "snap", None))
+                    if no_model and attempt < retries:
+                        log(f"{m}: Permission denied, and there is no other model to try")
+                    if len(trail) > 1 or no_model:
+                        r.diag_line = f"{getattr(r, 'diag_line', '') or e} [attempts: {'; '.join(trail)}]"
+                    return r
                 if isinstance(e, StallError):  # keep evidence of each stall, then retry in a fresh tab
                     ctx["model_selected"] = m
                     _, sd = write_diag(e, ctx, getattr(_tls, "snap", None), "STALLED")
                     log(f"{m}: STALLED, diagnostics in {sd}")
-                log(f"{m}: attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
-                # "Permission denied" comes and goes (more often right after a previous run):
-                # back off longer instead of hammering the account.
-                time.sleep((30 if "Permission denied" in str(e) else 5) * (attempt + 1))
+                log(f"{m}: attempt {attempt + 1} failed ({kind}): {e or type(e).__name__}; "
+                    f"retrying in {pause}s with {nxt}")
+                time.sleep(pause)
+            finally:
+                genwatch.bind(None)
 
     try:
         with ThreadPoolExecutor(max(1, jobs_n)) as ex:
-            return list(ex.map(one, jobs))
+            return list(ex.map(one, jobs, range(len(jobs))))
     finally:
         if owned:
             ch.quit()
@@ -764,9 +827,35 @@ def cmd_stop(args):
 
 
 def set_stall(args):
-    global STALL_SECONDS
+    """Apply --stall / --heartbeat / --attempt-timeout (generation watch options)."""
+    global STALL_SECONDS, HEARTBEAT_SECONDS, ATTEMPT_TIMEOUT
     if getattr(args, "stall", None):
         STALL_SECONDS = float(args.stall)
+    if getattr(args, "heartbeat", None):
+        HEARTBEAT_SECONDS = float(args.heartbeat)
+    if getattr(args, "attempt_timeout", None):
+        ATTEMPT_TIMEOUT = float(args.attempt_timeout)
+
+
+def watch_opts(s):
+    s.add_argument("--stall", type=float,
+                   help="seconds with no output growth and no generation indicator = STALLED (default 120)")
+    s.add_argument("--heartbeat", type=float, help="seconds between stderr heartbeat lines (default 15)")
+    s.add_argument("--attempt-timeout", type=float, help="max seconds for one attempt (default 900)")
+
+
+def cmd_runs(args, follow=False):
+    """`status --runs` / `watch`: state of the requests in flight (run-<pid>.json files)."""
+    while True:
+        runs = genwatch.list_runs(HOME, stall=STALL_SECONDS)
+        if args.json:
+            print(json.dumps(runs, ensure_ascii=False))
+        else:
+            print("\n".join(genwatch.format_run(r) for r in runs) or f"no runs in {HOME}", flush=True)
+        if not follow or not any(r.get("active") for r in runs) or not genwatch.runs_ok(runs):
+            break  # nothing left to wait for, or a run looks dead/stuck: report it now
+        time.sleep(args.interval)
+    sys.exit(0 if genwatch.runs_ok(runs) else 2)
 
 
 def cmd_ask(args):
@@ -793,6 +882,7 @@ def cmd_ask(args):
 
 def cmd_batch(args):
     """jsonl lines: {"id":..., "prompt":..., "model"?:..., "files"?:[...]} -> results jsonl."""
+    set_stall(args)
     jobs = [json.loads(line) for line in open(args.file) if line.strip()]
     built = []
     for j in jobs:
@@ -1076,7 +1166,7 @@ def cmd_code(args):
 
 # ---------------------------------------------------------------- router gate
 
-ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag")
+ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag", "watch")
 ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py", "mistral-chat", "mistral_chat.py",
                    "deepseek-chat", "deepseek_chat.py")
 
@@ -1280,6 +1370,8 @@ def cmd_diag(args):
 
 
 def cmd_status(args):
+    if args.runs:
+        cmd_runs(args)
     ok = bool(logged_in(json.load(open(COOKIES)) if os.path.exists(COOKIES) else []))
     print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}"
           + (f" tiers={TIERS}" if is_gemini() else ""))
@@ -1351,15 +1443,16 @@ def main():
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.add_argument("-s", "--system")
     s.add_argument("-o", "--out"); s.add_argument("--max-context", type=int, help="max chars of packed context "
                    "(default $OFFLOAD_MAX_CONTEXT or 400000)")
-    s.add_argument("--stall", type=float, help="seconds without output growth = STALLED (default 180)"); s.set_defaults(fn=cmd_ask)
+    watch_opts(s); s.set_defaults(fn=cmd_ask)
     s = sub.add_parser("serve", help="keep a warm Chrome running"); s.set_defaults(fn=cmd_serve)
     s = sub.add_parser("stop", help="stop the warm Chrome"); s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
+    watch_opts(s)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
     s.add_argument("task", nargs="?", default="", help="task text or - for stdin"); s.add_argument("--task-file")
     s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="*")
-    s.add_argument("--stall", type=float, help="seconds without output growth = STALLED (default 180)")
+    watch_opts(s)
     s.add_argument("--max-context", type=int, help="max chars of packed context (default "
                    "$OFFLOAD_MAX_CONTEXT or 400000); over the limit -> exit 3, nothing is truncated")
     s.add_argument("-t", "--test", help="shell command that must pass")
@@ -1375,7 +1468,12 @@ def main():
     s.set_defaults(fn=cmd_guard)
     s = sub.add_parser("diag", help="print the last N failure diagnostics summaries")
     s.add_argument("n", nargs="?", type=int, default=1); s.set_defaults(fn=cmd_diag)
-    s = sub.add_parser("status"); s.set_defaults(fn=cmd_status)
+    s = sub.add_parser("status", help="login state; --runs: requests in flight (exit 2 if one looks dead/stuck)")
+    s.add_argument("--runs", action="store_true"); s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_status, interval=5)
+    s = sub.add_parser("watch", help="like status --runs, repeated until every run has finished")
+    s.add_argument("-i", "--interval", type=float, default=5); s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=lambda a: cmd_runs(a, follow=True))
     a = p.parse_args()
     if a.cmd in ("ask", "code", "batch"):
         chain_guard()
