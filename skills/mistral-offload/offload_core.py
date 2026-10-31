@@ -245,6 +245,11 @@ JS_BOX = "document.querySelector(\"ms-prompt-input-wrapper textarea, textarea[ar
 JS_RUN = "document.querySelector(\"ms-run-button button, button[aria-label='Run']\")"
 
 
+def center_js(el):
+    """JS expression -> [x, y] of the element's centre (for a real CDP click)."""
+    return f"(()=>{{const r=({el}).getBoundingClientRect(); return [r.x+r.width/2, r.y+r.height/2];}})()"
+
+
 def _js_str(s):
     return json.dumps(s)
 
@@ -320,9 +325,7 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
         started = False
         for _ in range(3):  # a dialog may swallow the first click
             tab.c.eval(JS_CLOSE_DIALOGS)
-            x, y = tab.c.eval(f"(()=>{{const r={JS_RUN}.getBoundingClientRect();"
-                              " return [r.x+r.width/2, r.y+r.height/2];}})()")
-            tab.click(x, y)
+            tab.click(*tab.c.eval(center_js(JS_RUN)))
             try:
                 tab.wait_js("window.__ofl && window.__ofl.n > 0", timeout=20)
                 started = True

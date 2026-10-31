@@ -31,3 +31,12 @@ def test_small_machine_override(monkeypatch):
     import offload_core
     monkeypatch.setenv("OFFLOAD_ALLOW_LOCAL_BUILD", "1")
     assert offload_core._small_machine() is False
+
+
+def test_generated_js_parses():
+    import shutil, subprocess, pytest, offload_core as o
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    for js in (o.center_js(o.JS_RUN), o.JS_CLOSE_DIALOGS, o._fill_js(o.JS_BOX, "a\"b`c")):
+        r = subprocess.run(["node", "-e", f"new Function({js!r})"], capture_output=True, text=True)
+        assert r.returncode == 0, (js, r.stderr)
