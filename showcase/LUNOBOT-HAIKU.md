@@ -1,4 +1,4 @@
-# Lunobot on Haiku + Gemini offload: status and handoff (2026-10-31, ~20:45 UTC)
+# Lunobot on Haiku + Gemini offload: status and handoff (2026-10-31, ~20:50 UTC)
 
 Owner's goal: run Lunobot (unxed/lunobot) as **Claude Code subagents inside the owner's session** (not
 separate runner processes), each on Claude Haiku, offloading ALL substantive work to Gemini (AI Studio
@@ -26,16 +26,28 @@ full debug info. Goal now is to polish Haiku + offload, not throughput.**
 | `-p a -p b -p c` packed only `c` -> ap "Snippet not found" x3 on TRIAGE.md | `nargs="+", action="extend"` (a410799) |
 | New agent types load only at session start; quoting pitfalls | install.sh copies agents; SKILL.md notes (7a7cd6a) |
 
-## Now
-- Running: retry of **f4 triage** (up to 5 tickets missing from `projects/f4/TRIAGE.md`) by one Haiku
-  subagent (general-purpose + Lunobot instructions; the gated `lunobot-haiku` agent type was not yet loaded
-  in that session). Debug log: `/tmp/lunobot-1/work/dbg-triage/debug.md` (laptop).
-- Agent definition for the worker: `~/.claude/agents/lunobot-haiku.md` (Haiku, hook `aistudio guard --manager`).
+## Results (one-worker mode, gated `lunobot-haiku` subagents in the owner's session)
+- f4 triage of 912, 1980, 2226, 2228, 2230 by Gemini (3.8-flash): unxed/lunobot dcc61b7 (pushed by Opus, the
+  worker stopped because the triage gate was red for older tickets).
+- unxed/vtui#256 review comment by gemini-3.5-flash-lite, fully autonomous (Лунобот-2):
+  https://github.com/unxed/vtui/pull/256#issuecomment-6548659801
+- D-05 (account-216, unxed/f4#2162) analysis by gemini-3.8-flash recorded in status/2162.md: unxed/lunobot 092f7ce.
+  ~10 of 17 file:line refs were wrong (correction block added). OWNER_QUEUE state still says "взял в работу".
+- Signature rule for offloading (router + worker model): unxed/lunobot b2b7357.
 
-## Queue (one at a time, each with debug log, fix the skill on every failure)
-1. D-05 analysis for `account-216` (unxed/f4#2162) - failed twice (rate limit / Permission denied; context).
-2. Reply to PR unxed/vtui#256 - router never reported.
-3. goWidgets triage - workers returned without commits (context too large).
+## More skill fixes pushed
+| Problem | Fix |
+|---|---|
+| untracked `-p` dir silently not packed; quota on whole chain -> exit after 11 min | c6c476b |
+| manager gate blocked relative redirects into the work dir (no debug log written) | 0969655 |
+
+## In progress
+- Sonnet subagent (fresh clone /tmp/claude-1000/aifix2): `code` false success (file unchanged x2), malformed JSON
+  from 3.8-flash, line numbers in packed files for exact refs, optional `--verify-refs`.
+
+## Queue
+1. goWidgets triage (after the fixes above land).
+2. Fix OWNER_QUEUE account-216 state line.
 
 ## How to continue (another agent)
 - Skills installed from `~/dev/AI` (`~/.local/bin/aistudio`, `~/.claude/skills/*-offload`, `~/.claude/agents`).
