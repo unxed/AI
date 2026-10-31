@@ -19,6 +19,7 @@ import argparse
 import json
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1948,7 +1949,70 @@ def drive_loop(task, files_text, workdir, ask, model, max_steps=80, step_timeout
     return EXIT_LIMIT, f"max steps ({max_steps}) reached without done/blocked", len(steps)
 
 
+class _Tee:
+    """stderr duplicate: everything written also goes, line-buffered and flushed, to a log file."""
+    def __init__(self, orig, f):
+        self.orig, self.f, self.diag, self.err = orig, f, None, None
+
+    def write(self, s):
+        n = self.orig.write(s)
+        try:
+            self.f.write(s)
+            self.f.flush()
+            for ln in str(s).splitlines():
+                if ln.startswith("DIAG "):
+                    self.diag = ln
+                elif ln.startswith("ERROR"):
+                    self.err = ln
+        except Exception:
+            pass
+        return n
+
+    def flush(self):
+        self.orig.flush()
+
+    def __getattr__(self, k):
+        return getattr(self.orig, k)
+
+
+DRIVE_STATE = {"steps": 0, "last_model": None, "summary": ""}
+
+
 def cmd_drive(args):
+    """`drive`; with --log DIR also mirrors stderr into DIR/stderr.log and writes DIR/result.json on exit."""
+    if not args.log:
+        return _cmd_drive(args)
+    os.makedirs(args.log, exist_ok=True)
+    tee = _Tee(sys.stderr, open(os.path.join(args.log, "stderr.log"), "a", buffering=1, encoding="utf-8"))
+    sys.stderr = tee
+    DRIVE_STATE.update(steps=0, last_model=None, summary="")
+    code = 0
+    try:
+        _cmd_drive(args)
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        if isinstance(e.code, str):
+            print(e.code, file=sys.stderr, flush=True)
+            tee.err = tee.err or e.code
+        raise
+    except BaseException as e:
+        code = 1
+        tee.err = f"ERROR: {type(e).__name__}: {e}"
+        raise
+    finally:
+        sys.stderr = tee.orig
+        try:
+            res = {"exit": code, "reason": tee.diag or tee.err or ("DONE" if code == 0 else ""),
+                   "steps": DRIVE_STATE["steps"], "last_model": DRIVE_STATE["last_model"],
+                   "summary": DRIVE_STATE["summary"]}
+            with open(os.path.join(args.log, "result.json"), "w", encoding="utf-8") as f:
+                json.dump(res, f, ensure_ascii=False, indent=1)
+            tee.f.close()
+        except Exception:
+            pass
+
+
+def _cmd_drive(args):
     set_stall(args)
     task = open(args.task_file, encoding="utf-8").read()
     lim = max_context(getattr(args, "max_context", None))
@@ -1972,9 +2036,13 @@ def cmd_drive(args):
         ans = ask_many([(prompt, mdl, None)])[0]
         if isinstance(ans, Exception):
             raise ans
-        return ans, RESULTS.get(0, {}).get("actual") or mdl
+        DRIVE_STATE["last_model"] = RESULTS.get(0, {}).get("actual") or mdl
+        return ans, DRIVE_STATE["last_model"]
 
     def notify(s):
+        m = re.match(r"drive step (\d+)/", s)
+        if m:
+            DRIVE_STATE["steps"] = int(m.group(1)) - 1
         log(s)
         runs.note(s)
 
@@ -1987,6 +2055,7 @@ def cmd_drive(args):
         if not getattr(e, "diag_line", None):
             attach_diag(e, ctx)
         fail_exit(e)
+    DRIVE_STATE.update(steps=n, summary=str(text)[:2000])
     label = {0: "DONE", EXIT_BLOCKED: "BLOCKED", EXIT_LIMIT: "LIMIT"}.get(code, "ERROR")
     print(f"drive: {label} after {n} steps\nresult: {text}\nlog: {logdir}/drive.md", flush=True)
     sys.exit(code)
