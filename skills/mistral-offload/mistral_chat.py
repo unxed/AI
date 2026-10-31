@@ -84,7 +84,9 @@ def parse_chat_stream(raw):
             assistant = mid
     m = msgs.get(assistant) or {}
     chunks = m.get("contentChunks") or []
-    text = "".join(c.get("text", "") for c in chunks if isinstance(c, dict) and c.get("type") == "text")
+    # reasoning ("thinking") parts are text chunks tagged _context.type == "reasoning"
+    text = "".join(c.get("text", "") for c in chunks if isinstance(c, dict) and c.get("type") == "text"
+                   and (c.get("_context") or {}).get("type") != "reasoning")
     return m.get("generationStatus"), text or (m.get("content") or "")
 
 

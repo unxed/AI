@@ -19,3 +19,16 @@ def test_parse_full():
 def test_parse_partial():
     cut = RAW[:RAW.index('{"op":"append"') + 20]  # unterminated line mid-stream
     assert parse_chat_stream(cut) == ("in-progress", "PONG")
+
+
+# Captured: reasoning chunks streamed, collapsed into chunk 0, the answer becomes chunk 1.
+RAW_REASONING = '''15:{"json":{"type":"message","messageId":"a","patches":[{"op":"replace","path":"/","value":{"role":"assistant","contentChunks":null,"generationStatus":"in-progress"}}]}}
+15:{"json":{"type":"message","messageId":"a","patches":[{"op":"replace","path":"/contentChunks","value":[{"type":"text","text":"17","_context":{"type":"reasoning","contextId":"r0"}}]}]}}
+15:{"json":{"type":"message","messageId":"a","patches":[{"op":"add","path":"/contentChunks/1","value":{"type":"text","text":" *","_context":{"type":"reasoning","contextId":"r0"}}},{"op":"add","path":"/contentChunks/2","value":{"type":"text","text":" 23","_context":{"type":"reasoning","contextId":"r0"}}}]}}
+15:{"json":{"type":"message","messageId":"a","patches":[{"op":"remove","path":"/contentChunks/2"},{"op":"remove","path":"/contentChunks/1/_context"},{"op":"replace","path":"/contentChunks/1/text","value":"391"},{"op":"append","path":"/contentChunks/0/text","value":" * 23 = 391."}]}}
+15:{"json":{"type":"message","messageId":"a","patches":[{"op":"replace","path":"/generationStatus","value":"success"}]}}
+'''
+
+
+def test_parse_skips_reasoning():
+    assert parse_chat_stream(RAW_REASONING) == ("success", "391")

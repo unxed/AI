@@ -38,6 +38,13 @@ exec "$VENV/bin/python" "$HERE/aistudio.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/aistudio"
 
+# `ap` patcher (https://github.com/unxed/ap, vendored): the only patch format used for model-written code.
+cat > "$HOME/.local/bin/ap" <<EOF
+#!/bin/sh
+exec python3 "$HERE/vendor/ap.py" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/ap"
+
 # Small VMs: Chrome + AI Studio peak around 400-700 MB, make sure there is swap.
 mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
 swap_kb=$(awk '/SwapTotal/{print $2}' /proc/meminfo)

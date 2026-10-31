@@ -34,4 +34,11 @@ cat > "$HOME/.local/bin/deepseek-chat" <<EOW
 exec "$VENV/bin/python" "$HERE/deepseek_chat.py" "\$@"
 EOW
 chmod +x "$HOME/.local/bin/deepseek-chat"
+
+# `ap` patcher (https://github.com/unxed/ap, vendored): the only patch format used for model-written code.
+cat > "$HOME/.local/bin/ap" <<EOF
+#!/bin/sh
+exec python3 "$HERE/vendor/ap.py" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/ap"
 echo "Installed. Next: deepseek-chat login   (then: deepseek-chat ask 'hello')"

@@ -34,4 +34,11 @@ cat > "$HOME/.local/bin/mistral-chat" <<EOW
 exec "$VENV/bin/python" "$HERE/mistral_chat.py" "\$@"
 EOW
 chmod +x "$HOME/.local/bin/mistral-chat"
+
+# `ap` patcher (https://github.com/unxed/ap, vendored): the only patch format used for model-written code.
+cat > "$HOME/.local/bin/ap" <<EOF
+#!/bin/sh
+exec python3 "$HERE/vendor/ap.py" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/ap"
 echo "Installed. Next: mistral-chat login   (then: mistral-chat ask 'hello')"
