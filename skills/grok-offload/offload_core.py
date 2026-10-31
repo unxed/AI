@@ -581,6 +581,34 @@ def extract_patch(ans):
     return ans
 
 
+_FAIL_RE = None
+
+
+def failure_excerpt(out, limit=6000, tail=1500):
+    """The parts of a long test/CI log a model needs: every error block (Traceback, ERROR:,
+    FAIL, panic, compiler `error:`) with some context, plus the end of the log. A plain tail
+    misses e.g. an import error printed before hundreds of passing tests."""
+    import re
+    global _FAIL_RE
+    _FAIL_RE = _FAIL_RE or re.compile(
+        r"Traceback \(most recent|^(ERROR|FAIL)[: ]|^--- FAIL|^panic:|\berror(\[\w+\])?:|"
+        r"Error:|^E\s{3}|FAILED", re.M | re.I)
+    if len(out) <= limit:
+        return out
+    lines, keep = out.splitlines(), set()
+    for i, ln in enumerate(lines):
+        if _FAIL_RE.search(ln):
+            keep.update(range(max(0, i - 2), min(len(lines), i + 25)))
+    blocks, prev = [], -2
+    for i in sorted(keep):
+        if i != prev + 1:
+            blocks.append("...")
+        blocks.append(lines[i])
+        prev = i
+    head = "\n".join(blocks)[: limit - tail]
+    return f"{head}\n...\n[end of log]\n{out[-tail:]}"
+
+
 def _small_machine():
     """True on tiny VMs (< 2 GB RAM, e.g. GCP e2-micro): no local builds/tests there."""
     try:
@@ -627,8 +655,8 @@ def ci_check(root, branch, base, title, body, message, timeout):
             if not bad:
                 return True, ""
             out = "\n".join(_run(root, "gh", "run", "view", str(r["databaseId"]), "--log-failed",
-                                 check=False)[-6000:] for r in bad)
-            return False, out[-8000:]
+                                 check=False) for r in bad)
+            return False, failure_excerpt(out, limit=8000)
     return False, f"CI did not finish within {timeout}s"
 
 
@@ -686,7 +714,7 @@ def cmd_code(args):
             log(f"round {rnd}: tests passed")
             print(ans)
             return
-        out = (t.stdout + t.stderr)[-4000:]
+        out = failure_excerpt(t.stdout + t.stderr)
         log(f"round {rnd}: tests failed:\n{out[-1500:]}")
         history = (f"\nA previous patch WAS APPLIED (the codebase above already contains it) but "
                    f"the test command `{args.test}` failed:\n{out}\nSend a patch that fixes it.")

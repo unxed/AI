@@ -40,3 +40,12 @@ def test_generated_js_parses():
     for js in (o.center_js(o.JS_RUN), o.JS_CLOSE_DIALOGS, o._fill_js(o.JS_BOX, "a\"b`c")):
         r = subprocess.run(["node", "-e", f"new Function({js!r})"], capture_output=True, text=True)
         assert r.returncode == 0, (js, r.stderr)
+
+
+def test_failure_excerpt_keeps_early_traceback():
+    from offload_core import failure_excerpt
+    log = ("ok line\n" * 50 + "ERROR: test_x (loader._FailedTest)\nTraceback (most recent call last):\n"
+           "  File \"t.py\", line 3\nIndentationError: unindent\n" + "noise from passing tests\n" * 3000
+           + "Ran 598 tests\nFAILED (errors=1)\n")
+    ex = failure_excerpt(log)
+    assert "IndentationError" in ex and "FAILED (errors=1)" in ex and len(ex) < 6200
