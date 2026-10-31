@@ -749,6 +749,17 @@ def choose_model(ch, prompt):
     return TIERS[tier]
 
 
+QUOTA_KINDS = ("quota", "rate limit", "empty answer")
+
+
+def quota_wait():
+    """Seconds to wait before the second pass over the chain ($OFFLOAD_QUOTA_WAIT, default 120)."""
+    try:
+        return float(os.environ.get("OFFLOAD_QUOTA_WAIT") or 120)
+    except ValueError:
+        return 120.0
+
+
 def ask_many(jobs, jobs_n=3, retries=2, stagger=0):
     """jobs: list of (prompt, model, system). Returns list of text or Exception.
     Runs up to jobs_n tabs in parallel in one Chrome. Every attempt is watched: heartbeat on
@@ -779,7 +790,9 @@ def ask_many(jobs, jobs_n=3, retries=2, stagger=0):
         requested = model
         chain = [model] + ([] if NO_FALLBACK else FALLBACK.get(model, []))
         denied, trail, skip = {}, [], 0
-        for attempt in range(retries + 1):
+        limit, pass2, attempt = retries, False, -1
+        while attempt < limit:
+            attempt += 1
             m = chain[min(attempt - skip, len(chain) - 1)]
             _tls.snap = None
             att = runs.begin(m, attempt + 1, jid, requested)
@@ -810,10 +823,21 @@ def ask_many(jobs, jobs_n=3, retries=2, stagger=0):
                     # sibling models; the same model answered a minute later): one more try after a pause
                     pause = max(pause, 60)
                 no_model = denied.get(nxt, 0) >= 2  # a model denied twice is not retried again
-                if attempt == retries or "login" in str(e) or no_model or nxt is None:
+                if (attempt == limit and not pass2 and not NO_FALLBACK and not no_model and nxt is not None
+                        and "login" not in str(e) and all(t.split(": ", 1)[-1] in QUOTA_KINDS for t in trail)):
+                    # every model of the chain hit quota/rate limit/empty answer: they often recover
+                    # within minutes (live: the retry a few minutes later succeeded); one more pass
+                    wait = quota_wait()
+                    log(f"quota on all models, waiting {wait:g}s before one more pass")
+                    runs.note(f"quota on all models: waiting {wait:g}s before one more pass")
+                    pass2, limit, skip = True, attempt + retries + 1, attempt + 1
+                    trail.append(f"[waited {wait:g}s, pass 2]")
+                    time.sleep(wait)
+                    continue
+                if attempt == limit or "login" in str(e) or no_model or nxt is None:
                     ctx["model_selected"] = m
                     r = attach_diag(e, ctx, getattr(_tls, "snap", None))
-                    if no_model and attempt < retries:
+                    if no_model and attempt < limit:
                         log(f"{m}: Permission denied, and there is no other model to try")
                     if NO_FALLBACK and m == requested:
                         r.args = (f"requested model {requested} unavailable (--no-fallback): {e}",)
@@ -960,33 +984,88 @@ SKIP_EXT = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".wasm", "
             ".jar", ".class", ".mp3", ".mp4", ".lock")
 
 
-def pack_tree(root, paths=None):
-    """Text files (read-only) as [(path, body)]. In a git repo only tracked files are used;
-    `paths` limits to given files/dirs."""
-    root = os.path.abspath(root)
+class PathNotFound(Exception):
+    """An explicit -p path matched no packable file (missing, empty, or all skipped)."""
+    def __init__(self, path):
+        self.path = path
+        super().__init__(f"-p path {path!r} matched no files (missing, empty, or only binary/ignored files); "
+                         f"nothing was sent")
+
+
+_SKIP_DIRS = ("node_modules", "__pycache__", "venv", ".venv", "dist", "build")
+
+
+def _walk_files(root, p):
+    """Files under root/p (a file or dir) by walking the filesystem, relative to root."""
+    full = os.path.join(root, p)
+    out = []
+    if os.path.isfile(full):
+        out.append(os.path.normpath(p))
+    for d, dirs, fs in os.walk(full):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x not in _SKIP_DIRS)
+        out += [os.path.relpath(os.path.join(d, f), root) for f in sorted(fs)]
+    return out
+
+
+def _readable(root, f):
+    full = os.path.join(root, f)
+    if f.lower().endswith(SKIP_EXT) or not os.path.isfile(full) or os.path.islink(full):
+        return None
     try:
-        files = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", *(paths or [])],
-                               capture_output=True, text=True, check=True).stdout.split("\0")
+        return open(full, encoding="utf-8").read()
+    except (UnicodeDecodeError, OSError):
+        return None
+
+
+def pack_tree(root, paths=None, counts=None):
+    """Text files (read-only) as [(path, body)]. In a git repo tracked files are used; an
+    explicit path that git knows nothing about (untracked) but that exists is walked on disk.
+    An explicit path yielding no files raises PathNotFound. `counts`, if a dict, receives
+    {path: n_files}."""
+    root = os.path.abspath(root)
+    seen, items = set(), []
+
+    def add(files, key):
+        n = 0
+        for f in filter(None, files):
+            if f in seen:
+                n += 1
+                continue
+            body = _readable(root, f)
+            if body is None:
+                continue
+            seen.add(f)
+            items.append((f, body))
+            n += 1
+        if counts is not None:
+            counts[key] = n
+        return n
+
+    def tracked(args):
+        return subprocess.run(["git", "-C", root, "ls-files", "-z", "--", *args],
+                              capture_output=True, text=True, check=True).stdout.split("\0")
+
+    try:
+        tracked([])
+        git = True
     except Exception:
+        git = False
+    if not paths:
+        add(tracked([]) if git else _walk_files(root, "."), ".")
+        return items
+    for p in paths:
         files = []
-        for p in (paths or ["."]):
-            full = os.path.join(root, p)
-            if os.path.isfile(full):
-                files.append(p)
-            for d, dirs, fs in os.walk(full):
-                dirs[:] = sorted(x for x in dirs if not x.startswith(".") and x not in
-                                 ("node_modules", "__pycache__", "venv", ".venv", "dist", "build"))
-                files += [os.path.relpath(os.path.join(d, f), root) for f in sorted(fs)]
-    items = []
-    for f in filter(None, files):
-        full = os.path.join(root, f)
-        if f.lower().endswith(SKIP_EXT) or not os.path.isfile(full) or os.path.islink(full):
-            continue
-        try:
-            body = open(full, encoding="utf-8").read()
-        except (UnicodeDecodeError, OSError):
-            continue
-        items.append((f, body))
+        if git:
+            try:
+                files = [f for f in tracked([p]) if f]
+            except Exception:
+                files = []
+            # untracked files of an explicit dir are NOT added when git knows part of it:
+            # only a path git knows nothing about falls back to the filesystem
+        if not files and os.path.exists(os.path.join(root, p)):
+            files = _walk_files(root, p)
+        if not add(files, p):
+            raise PathNotFound(p)
     return items
 
 
@@ -995,10 +1074,10 @@ def render_tree(items):
                         for f, body in items)
 
 
-def combine_tree(root, paths=None, max_chars=None, extra=0):
+def combine_tree(root, paths=None, max_chars=None, extra=0, counts=None):
     """Concatenate source files as `=== BEGIN path ===` blocks. Never truncates: raises
     ContextTooLarge when the result (+ `extra` chars of task text) exceeds `max_chars`."""
-    items = pack_tree(root, paths)
+    items = pack_tree(root, paths, counts)
     text = render_tree(items)
     if max_chars and len(text) + extra > max_chars:
         raise ContextTooLarge(len(text) + extra, max_chars, [(f, len(b)) for f, b in items], len(items))
@@ -1150,9 +1229,16 @@ def cmd_code(args):
     t0, last_reason, last_detail = time.time(), None, ""
     dctx = {"command": " ".join(sys.argv), "model_requested": args.model, "t0": t0}
     for rnd in range(1, args.rounds + 1):
-        items = pack_tree(root, args.paths)
+        counts = {}
+        try:
+            items = pack_tree(root, args.paths, counts)
+        except PathNotFound as e:
+            print(f"ERROR: {e}", file=sys.stderr, flush=True)
+            sys.exit(EXIT_CONTEXT)
         tree = render_tree(items)
         RUN["files"] = dctx["files"] = len(items)
+        if args.paths:
+            log("context paths: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
         dctx["prompt_chars"] = len(tree) + len(task or "")
         log(f"context: {len(items)} files, {len(tree) + len(task or '')} chars")
         if len(tree) + len(task or "") > lim:

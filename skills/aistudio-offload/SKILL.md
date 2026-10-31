@@ -183,6 +183,7 @@ it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
   (blocks Edit/MultiEdit/NotebookEdit, Write except `task*.md`/`*.task.md`/`tasks/`, and inline code or file writes in
   Bash: `python3 -c`, heredocs, `sed -i`, `perl -e/-i`, `tee`, `> file`, `git apply`/`patch`/`ap`, `gh --body "..."`):
   `claude -p --settings '{"hooks":{"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"aistudio guard --manager"}]}]}}'`
+- **Explicit `-p` paths and quota**: `-p` paths that git does not track are packed from disk (a path matching no files exits 3 naming it; per-path counts in the `context paths:` log line); when every model of the chain fails with quota/rate limit/empty answer, the engine waits `OFFLOAD_QUOTA_WAIT` s (default 120) and makes one more pass.
 - **Context size**: the packed context (+task) is limited to 400000 chars (`--max-context N` on `code`/`ask`, or
   `OFFLOAD_MAX_CONTEXT`). Nothing is ever truncated: over the limit the command exits with code 3 and lists the 15
   largest files. `code` on a big repo needs `-p <paths...>`; for `ask` pass fewer `-f`. Every call logs
