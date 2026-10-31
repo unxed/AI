@@ -42,3 +42,11 @@ exec python3 "$HERE/vendor/ap.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/ap"
 echo "Installed. Next: mistral-chat login   (then: mistral-chat ask 'hello')"
+
+# Claude Code subagents (router + manager). Claude Code loads agent types only at session start:
+# restart the session after installing, or `subagent_type` is not found and no gate is attached.
+if [ -d "$HOME/.claude" ]; then
+  mkdir -p "$HOME/.claude/agents"
+  cp "$HERE"/agents/claude/*.md "$HOME/.claude/agents/"
+  echo "Installed Claude Code agents: $(ls "$HERE"/agents/claude | tr '\n' ' ')(restart Claude Code to load them)"
+fi

@@ -77,6 +77,18 @@ on stderr: pass it to any sub-task you derive from the answer.
   `screenshot.jpg`, `alerts.txt`) and prints `DIAG <REASON> <dir>: <message>`. Reasons: STALLED QUOTA RATE_LIMIT
   PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED
   UNKNOWN. `mistral-chat diag [N]` prints the last N summaries (routers may run it).
+- **Manager as a subagent**: `agents/claude/offload-manager.md` (`mistral-offload-manager`, Haiku, gated by
+  `mistral-chat guard --manager`) runs the orchestrator inside a Claude Code session instead of a separate `claude -p`.
+- **Agents load at session start**: `install.sh` copies `agents/claude/*.md` to `~/.claude/agents/`; Claude Code
+  sees new agent types only in a new session. Without a restart `subagent_type` is "not found" and no gate is
+  attached; do not fall back to an ungated general-purpose agent silently, say so.
+- **Never put a task into a double-quoted shell argument** that contains backticks or `$(...)`: the shell runs them.
+  (Seen: a prompt mentioning `` `mistral-chat code|ask` `` ran `mistral-chat code` on $HOME and sent it to the model.) Use
+  `--task-file`.
+- **`-p` is repeatable**: `-p a -p b` and `-p a b` both pack a and b (before the fix only the last `-p` was packed,
+  so the model never saw the file it had to patch: ap "Snippet not found").
+- **Permission denied is usually transient** (seen while sibling models were rate-limited; the same model answered a
+  minute later): the engine retries the model once after >= 60 s.
 
 ## Generation control (never wait silently)
 

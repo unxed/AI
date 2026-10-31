@@ -53,3 +53,11 @@ if [ "$mem_kb" -lt 2000000 ] && [ "$swap_kb" -lt 1000000 ]; then
   echo "  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
 fi
 echo "Installed. Next: aistudio login   (then: aistudio ask 'hello')"
+
+# Claude Code subagents (router + manager). Claude Code loads agent types only at session start:
+# restart the session after installing, or `subagent_type` is not found and no gate is attached.
+if [ -d "$HOME/.claude" ]; then
+  mkdir -p "$HOME/.claude/agents"
+  cp "$HERE"/agents/claude/*.md "$HOME/.claude/agents/"
+  echo "Installed Claude Code agents: $(ls "$HERE"/agents/claude | tr '\n' ' ')(restart Claude Code to load them)"
+fi
