@@ -107,6 +107,12 @@ heartbeat (with `phase=`), the status file and the retry rules, but not the page
 ```bash
 deepseek-chat status --runs      # one line per run: pid, model, attempt, state, answer_chars, silent_for, health
 deepseek-chat status --runs --json
+```
+
+`deepseek-chat status` also closes orphan tabs in the offload browser: tabs whose process was
+killed (each tab records its owner pid in `~/.offload-browser/tabs/`). Tabs of live runs are never touched.
+
+```bash
 deepseek-chat watch -i 10        # repeats it until every run has finished
 ```
 

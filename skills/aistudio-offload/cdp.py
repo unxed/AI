@@ -40,6 +40,16 @@ def _port_open(port):
         return False
 
 
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+
+
 def _free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -149,12 +159,21 @@ class Chrome:
     def browser(self):
         return Conn(self._json("version")["webSocketDebuggerUrl"])
 
+    def _owner_file(self, tid):
+        return os.path.join(os.path.dirname(self.port_file), "tabs", tid)
+
     def new_tab(self, url="about:blank"):
         b = self.browser()
         try:
             tid = b.call("Target.createTarget", url=url)["targetId"]
         finally:
             b.close()
+        try:  # owner registry: a tab whose process died is an orphan (see reap_orphan_tabs)
+            os.makedirs(os.path.dirname(self._owner_file(tid)), exist_ok=True)
+            with open(self._owner_file(tid), "w") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
         for t in self._json("list"):
             if t["id"] == tid:
                 return Tab(self, tid, t["webSocketDebuggerUrl"])
@@ -182,6 +201,49 @@ class Chrome:
             return b.call("Storage.getCookies")["cookies"]
         finally:
             b.close()
+
+    def reap_orphan_tabs(self, others_alive=False):
+        """Close tabs left behind by killed processes; returns their URLs.
+
+        A registered tab (tabs/<targetId> holds the owner pid) is closed when its owner is dead.
+        An unregistered tab (from an older engine, or opened by hand) is closed only when no
+        offload process is alive at all (`others_alive` is False and no registered owner lives),
+        except about:blank. One page always stays open, so Chrome keeps running."""
+        reg = os.path.dirname(self._owner_file("x"))
+        owners = {}
+        for tid in os.listdir(reg) if os.path.isdir(reg) else []:
+            try:
+                owners[tid] = int(open(os.path.join(reg, tid)).read().strip() or 0)
+            except (OSError, ValueError):
+                owners[tid] = 0
+        pages = [t for t in self._json("list") if t.get("type") == "page"]
+        ids = {t["id"] for t in pages}
+        for tid in set(owners) - ids:  # tab already gone: drop its record
+            try:
+                os.remove(os.path.join(reg, tid))
+            except OSError:
+                pass
+        anyone = others_alive or any(pid_alive(owners[t["id"]]) for t in pages if owners.get(t["id"]))
+        doomed = [t for t in pages
+                  if (t["id"] in owners and not (owners[t["id"]] and pid_alive(owners[t["id"]])))
+                  or (t["id"] not in owners and not anyone and t.get("url") != "about:blank")]
+        if doomed and len(doomed) == len(pages):
+            self.browser().call("Target.createTarget", url="about:blank")
+        closed = []
+        for t in doomed:
+            b = self.browser()
+            try:
+                b.call("Target.closeTarget", targetId=t["id"], timeout=10)
+                closed.append(t.get("url", ""))
+            except Exception:
+                pass
+            finally:
+                b.close()
+            try:
+                os.remove(os.path.join(reg, t["id"]))
+            except OSError:
+                pass
+        return closed
 
     def quit(self):
         try:
@@ -296,6 +358,10 @@ class Tab:
 
     def close(self):
         self.c.close()
+        try:
+            os.remove(self.chrome._owner_file(self.tid))
+        except OSError:
+            pass
         try:
             b = self.chrome.browser()
             b.call("Target.closeTarget", targetId=self.tid, timeout=10)

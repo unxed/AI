@@ -17,6 +17,7 @@ State lives in $AISTUDIO_HOME (default ~/.aistudio): profile/, cookies.json.
 """
 import argparse
 import json
+import glob
 import os
 import shutil
 import subprocess
@@ -1539,9 +1540,26 @@ def cmd_diag(args):
         print(open(os.path.join(base, d, "summary.txt"), encoding="utf-8", errors="replace").read())
 
 
+def reap_tabs():
+    """Close the offload browser's tabs whose process was killed (never starts Chrome)."""
+    if not chrome_state().startswith("running"):
+        return []
+    others = any(genwatch._alive(int(os.path.basename(p)[4:-5]))
+                 for p in glob.glob(os.path.join(HOME, "run-*.json"))
+                 if os.path.basename(p)[4:-5].isdigit() and int(os.path.basename(p)[4:-5]) != os.getpid())
+    try:
+        return Chrome(PROFILE, PORT_FILE).reap_orphan_tabs(others_alive=others)
+    except Exception as e:
+        log(f"tab cleanup skipped: {e}")
+        return []
+
+
 def cmd_status(args):
     if args.runs:
         cmd_runs(args)
+    closed = reap_tabs()
+    if closed:
+        log(f"closed {len(closed)} orphan tab(s) of killed processes: " + ", ".join(u[:60] for u in closed))
     ok = bool(logged_in(json.load(open(COOKIES)) if os.path.exists(COOKIES) else []))
     print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}"
           + (f" tiers={TIERS}" if is_gemini() else ""))
