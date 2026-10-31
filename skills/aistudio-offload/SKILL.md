@@ -14,6 +14,17 @@ Two roles:
 
 The main agent decides *what* to do and *which Gemini model*; the router does the plumbing.
 
+## Terminology / Термины
+
+- **браузер скилла aistudio** (*the aistudio skill browser*) — headless Chrome, который поднимает
+  команда `aistudio` и через который идёт вся работа с Gemini в AI Studio. Профиль:
+  `~/.offload-browser/profile`; свой вход в Google, общий для всех `*-offload` скиллов.
+- Это не встроенный браузер Claude desktop app и не Chrome пользователя.
+- Не называть его «CLI» или «CLI-профилем»: `aistudio` — это команда, а Gemini всегда работает
+  через браузер скилла. Пример: «браузер скилла aistudio не залогинен» (`aistudio status`:
+  `logged_in=False`), а не «CLI не залогинен».
+- Отчёты роутеров используют этот термин.
+
 ## 0. Setup (once per machine)
 
 ```bash
@@ -155,7 +166,7 @@ it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
 - `afailed.ap exists ...` from `ap` → delete `afailed.ap`/`afailed.md` and rerun.
 - `Run did not start` / `Empty answer` → quota or safety block: retry later or use another `-m`.
 - `Google Chrome not found` → rerun install.sh or set `AISTUDIO_CHROME`.
-- State: `~/.aistudio` (`profile/`, `cookies.json` mode 600). Override with `AISTUDIO_HOME`.
+- State: `~/.offload-browser` (`profile/`, `cookies-google.json` mode 600). Override with `AISTUDIO_HOME` (or `OFFLOAD_HOME`).
 
 ## Manager gate, context size, diagnostics
 

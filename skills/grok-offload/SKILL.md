@@ -11,6 +11,16 @@ this folder carries its own copy of the engine (`offload_core.py`, `cdp.py`, `ve
 Roles: a cheap **router** model only runs `grok` commands (hard-gated, see below);
 **Grok** does all thinking and writing. Never solve the task yourself.
 
+## Terminology / Термины
+
+- **браузер скилла grok** (*the grok skill browser*) — headless Chrome, который поднимает команда
+  `grok` и через который идёт вся работа с Grok в X. Профиль: `~/.offload-browser/profile`
+  (общий с остальными `*-offload` скиллами).
+- Это не встроенный браузер Claude desktop app и не Chrome пользователя.
+- Не называть его «CLI» или «CLI-профилем»: `grok` — это команда, а Grok всегда работает через
+  браузер скилла. Пример: «браузер скилла grok не залогинен», а не «CLI не залогинен».
+- Отчёты роутеров используют этот термин.
+
 ```bash
 ./install.sh                     # once; creates ~/.local/bin/grok
 grok status || grok login        # sign in to X at http://127.0.0.1:8766/ (ssh -L on VMs)
@@ -20,7 +30,7 @@ grok batch jobs.jsonl -j 2
 ```
 
 Notes:
-- State lives in `~/.grok-offload` (separate Chrome profile from AI Studio).
+- State lives in `~/.offload-browser` (profile `profile/`, shared with the other `*-offload` skills).
 - Prompts over ~50k characters (e.g. `code` with a codebase) are attached as a `.txt` file;
   the X upload accepts .txt/.md/.json/.csv/.pdf but not archives, so sources are packed
   into text (`=== BEGIN path ===` blocks).

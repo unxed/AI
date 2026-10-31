@@ -9,6 +9,16 @@ Separate, self-contained skill (own copy of the engine: `offload_core.py`, `cdp.
 `vendor/ap`). Roles: a cheap **router** runs `deepseek-chat` commands only (hard gate);
 **DeepSeek** does all thinking and writing. Never solve the task yourself.
 
+## Terminology / Термины
+
+- **браузер скилла deepseek-chat** (*the deepseek-chat skill browser*) — headless Chrome, который
+  поднимает команда `deepseek-chat` и через который идёт вся работа с DeepSeek. Профиль:
+  `~/.offload-browser/profile` (общий с остальными `*-offload` скиллами).
+- Это не встроенный браузер Claude desktop app и не Chrome пользователя.
+- Не называть его «CLI» или «CLI-профилем»: `deepseek-chat` — это команда, а DeepSeek всегда работает
+  через браузер скилла. Пример: «браузер скилла deepseek-chat не залогинен», а не «CLI не залогинен».
+- Отчёты роутеров используют этот термин.
+
 ```bash
 ./install.sh                         # once: venv + Google Chrome, ~/.local/bin/deepseek-chat
 deepseek-chat status || deepseek-chat login   # http://127.0.0.1:8766/ ("Log in with Google" works)
