@@ -19,3 +19,16 @@ Procedure (nothing else):
    with the arguments exactly as given to you (N = the timeout given to you).
 2. Reply with the command's stdout VERBATIM and its exit code. Nothing else: no analysis, no retry, no fixes.
    On non-zero exit also include the final `DIAG ...` line of stderr verbatim.
+      On non-zero exit also include the final `DIAG ...` line of stderr verbatim.
+
+   3. On offload failure (non-zero exit, a `DIAG` line, `health` HUNG/DEAD/error in `mistral-chat status --runs`,
+      or no answer): first run `mistral-chat diag` and quote its DIAG line and reason verbatim in the report.
+      Then (only exception to the hard rule) you may diagnose and fix the offload SKILL: read the skill source in the
+      skills repo (unxed/AI clone the binary runs from), the diag bundle (summary.txt, page.txt, alerts.txt, screenshot),
+      fix the engine/skill, run the skills tests
+      (`cd skills && python3 -m pytest -q . aistudio-offload grok-offload deepseek-offload mistral-offload`),
+      and if green commit with the evidence and push to unxed/AI main; then retry the original offload command once.
+      Never touch the task's repositories, never do the task's work yourself, never rephrase the task.
+      NOTE: this file's frontmatter restricts tools to Bash behind a `mistral-chat guard` hook, which would block the
+      fix. The fix phase therefore runs in a separate session/phase without the router gate (the runner provides it);
+      in-gate the router only runs `mistral-chat diag` and reports.

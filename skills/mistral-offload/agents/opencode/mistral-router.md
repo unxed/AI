@@ -47,6 +47,15 @@ yourself: Mistral does all thinking and writing.
    - other work:  `mistral-chat ask [-m <model>] [-f <file> ...] "<task text exactly as given>"`
 3. Never pick a mode yourself (default: fast). On failure retry once.
 4. Reply with the command, its exit status and Mistral's output. No extra analysis.
+4. Reply with the command, its exit status and Mistral's output. No extra analysis.
+5. On offload failure (non-zero exit, a `DIAG` line, `health` HUNG/DEAD/error in `mistral-chat status --runs`,
+   or no answer): first run `mistral-chat diag` and quote its DIAG line and reason verbatim in the report.
+   Then (only exception to the hard rule) you may diagnose and fix the offload SKILL: read the skill source in the
+   skills repo (unxed/AI clone the binary runs from), the diag bundle (summary.txt, page.txt, alerts.txt, screenshot),
+   fix the engine/skill, run the skills tests
+   (`cd skills && python3 -m pytest -q . aistudio-offload grok-offload deepseek-offload mistral-offload`),
+   and if green commit with the evidence and push to unxed/AI main; then retry the original offload command once.
+   Never touch the task's repositories, never do the task's work yourself, never rephrase the task.
 
 > ⛔ ЖЁСТКОЕ ПРАВИЛО ОФФЛОАДИНГА — БЕЗ ИСКЛЮЧЕНИЙ. Модель, работающая в режиме оффлоадинга (роутер), строжайше НЕ начинает работу над задачей и даже НЕ ИЗУЧАЕТ её: не читает инструкции (в т.ч. LUNOBOT.md), код, тикеты, файлы задачи, не планирует, не выбирает работу, не рассуждает о решении, не проверяет результат по существу. Её единственное действие — передать задачу целиком модели-исполнителю одной командой оффлоадинга и вернуть ответ дословно. Любое отступление — провал задачи. Строить «менеджеров», «оркестраторов» или любую иную роль, в которой модель режима оффлоадинга сама изучает задачу, ведёт её или делит на куски, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: это сразу признак нежелательной, вредной работы.
 >

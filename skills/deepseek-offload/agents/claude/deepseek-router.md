@@ -35,6 +35,18 @@ Procedure:
    VERBATIM in the final report (reason code + bundle path, e.g. `DIAG QUOTA /home/.../diag/...`).
    Reason codes: STALLED QUOTA RATE_LIMIT PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY
    EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED UNKNOWN. Do not interpret or fix them.
+      EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED UNKNOWN. Do not interpret or fix them.
+   6. On offload failure (non-zero exit, a `DIAG` line, `health` HUNG/DEAD/error in `deepseek-chat status --runs`,
+      or no answer): first run `deepseek-chat diag` and quote its DIAG line and reason verbatim in the report.
+      Then (only exception to the hard rule) you may diagnose and fix the offload SKILL: read the skill source in the
+      skills repo (unxed/AI clone the binary runs from), the diag bundle (summary.txt, page.txt, alerts.txt, screenshot),
+      fix the engine/skill, run the skills tests
+      (`cd skills && python3 -m pytest -q . aistudio-offload grok-offload deepseek-offload mistral-offload`),
+      and if green commit with the evidence and push to unxed/AI main; then retry the original offload command once.
+      Never touch the task's repositories, never do the task's work yourself, never rephrase the task.
+      NOTE: this file's frontmatter restricts tools to Bash behind a `deepseek-chat guard` hook, which would block the
+      fix. The fix phase therefore runs in a separate session/phase without the router gate (the runner provides it);
+      in-gate the router only runs `deepseek-chat diag` and reports.
 
 > ⛔ ЖЁСТКОЕ ПРАВИЛО ОФФЛОАДИНГА — БЕЗ ИСКЛЮЧЕНИЙ. Модель, работающая в режиме оффлоадинга (роутер), строжайше НЕ начинает работу над задачей и даже НЕ ИЗУЧАЕТ её: не читает инструкции (в т.ч. LUNOBOT.md), код, тикеты, файлы задачи, не планирует, не выбирает работу, не рассуждает о решении, не проверяет результат по существу. Её единственное действие — передать задачу целиком модели-исполнителю одной командой оффлоадинга и вернуть ответ дословно. Любое отступление — провал задачи. Строить «менеджеров», «оркестраторов» или любую иную роль, в которой модель режима оффлоадинга сама изучает задачу, ведёт её или делит на куски, КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО: это сразу признак нежелательной, вредной работы.
 >
