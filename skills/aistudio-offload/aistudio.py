@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
-"""aistudio.py - offload LLM work to Google AI Studio's *chat UI* via headless Chrome.
+"""aistudio - offload LLM work to Google AI Studio's *chat UI* via a headless real Chrome.
 
-The chat UI (aistudio.google.com) has much higher free quotas than the API, so
-this tool never touches the API: it drives a real (headless) browser with your
-Google session cookies.
+The chat UI (aistudio.google.com) has much higher free quotas than the API, so this
+tool never touches the API: it drives a real Google Chrome over a minimal raw CDP
+connection (no Playwright/Selenium, which Google detects) with your Google session.
 
-  aistudio.py login                 # sign in once (visible Chrome), saves cookies
-  aistudio.py login --remote        # same, on a headless VM (via ssh -L tunnel)
-  aistudio.py ask "question"        # answer -> stdout
-  aistudio.py ask -f a.py -f b.py "refactor this"   # files are inlined
-  echo prompt | aistudio.py ask -   # prompt from stdin
-  aistudio.py serve &               # keep a warm browser; `ask` uses it if running
-  aistudio.py batch prompts.jsonl   # parallel, N tabs (see --jobs)
+  aistudio login                    # sign in once via a web remote view (works over ssh -L)
+  aistudio ask "question"           # answer -> stdout
+  aistudio ask -f a.py -f b.py "refactor this"   # files are inlined
+  echo prompt | aistudio ask -      # prompt from stdin
+  aistudio code "task" -t "make test"   # Gemini writes an ap patch, applied + tested
+  aistudio batch prompts.jsonl -j 3 # parallel, one tab per job
+  aistudio serve                    # keep Chrome warm between calls (optional)
 
-State lives in $AISTUDIO_HOME (default ~/.aistudio): cookies.json, profile/.
+State lives in $AISTUDIO_HOME (default ~/.aistudio): profile/, cookies.json.
 """
 import argparse
-import asyncio
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
-import threading
 import time
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from cdp import Chrome, _port_open  # noqa: E402
 
 HOME = os.path.expanduser(os.environ.get("AISTUDIO_HOME", "~/.aistudio"))
 COOKIES = os.path.join(HOME, "cookies.json")
 PROFILE = os.path.join(HOME, "profile")
-PORT = int(os.environ.get("AISTUDIO_PORT", "8765"))
+PORT_FILE = os.path.join(HOME, "chrome.port")
 DEFAULT_MODEL = os.environ.get("AISTUDIO_MODEL", "gemini-3.8-flash")
 BASE = "https://aistudio.google.com"
 GEN_RPC = "MakerSuiteService/GenerateContent"
@@ -42,61 +42,64 @@ def log(*a):
         print("[aistudio]", *a, file=sys.stderr, flush=True)
 
 
-LAUNCH_ARGS = ["--disable-gpu", "--disable-dev-shm-usage", "--no-sandbox",
-               "--disable-blink-features=AutomationControlled", "--lang=en-US"]
-UA = os.environ.get("AISTUDIO_UA", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36")
-
-
-def launch_kwargs(viewport=(1280, 900)):
-    """Persistent-context options. A normal desktop UA (not 'HeadlessChrome') keeps
-    Google sign-in and AI Studio happy; AISTUDIO_CHROME picks a browser binary."""
-    kw = dict(headless=os.environ.get("AISTUDIO_HEADED") != "1",
-              viewport={"width": viewport[0], "height": viewport[1]},
-              user_agent=UA, locale="en-US", args=LAUNCH_ARGS)
-    if os.environ.get("AISTUDIO_CHROME"):
-        kw["executable_path"] = os.environ["AISTUDIO_CHROME"]
-    return kw
-
-
-# ---------------------------------------------------------------- login
-
 def _logged_in(cookies):
     names = {c["name"] for c in cookies if c["domain"].endswith("google.com")}
     return "SID" in names or "__Secure-1PSID" in names
 
 
+def _save_cookies(ck):
+    os.makedirs(HOME, exist_ok=True)
+    fd = os.open(COOKIES, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(ck, f)
+
+
+def open_chrome():
+    """Running Chrome on our profile (reused if `serve`/another call started it)."""
+    os.makedirs(HOME, exist_ok=True)
+    fresh = not os.path.exists(PROFILE)
+    ch = Chrome(PROFILE, PORT_FILE)
+    if fresh and os.path.exists(COOKIES):
+        ch.set_cookies(json.load(open(COOKIES)))  # e.g. cookies imported from another machine
+    return ch
+
+
+# ---------------------------------------------------------------- login
+
 LOGIN_HTML = """<!doctype html><meta charset=utf-8><title>aistudio login</title>
-<style>body{margin:0;background:#222;color:#eee;font:14px sans-serif}#bar{padding:6px}
-img{display:block;cursor:crosshair;max-width:100%}input{width:40%}</style>
-<div id=bar>Click the picture to focus, then type directly (or use the box + Enter).
- <input id=t placeholder="text to type"> <button onclick="k('Enter')">Enter</button>
- <button onclick="k('Tab')">Tab</button> <button onclick="k('Backspace')">&#9003;</button>
- <span id=st></span></div><img id=s tabindex=0>
+<style>body{margin:0;background:#222;color:#eee;font:15px sans-serif}#bar{padding:8px;display:flex;gap:6px;
+flex-wrap:wrap;align-items:center}#t{flex:1;min-width:240px;font-size:18px;padding:8px}button{font-size:15px;padding:6px 10px}
+img{display:block;cursor:crosshair;max-width:100%;outline:none}#st{opacity:.7;font-size:12px;width:100%}</style>
+<div id=bar><input id=t autofocus autocomplete=off placeholder="1) click a field in the picture  2) type or paste here  3) press Enter">
+<button onclick="send(true)">Type + Enter</button><button onclick="send(false)">Type</button>
+<button onclick="k('Tab')">Tab</button><button onclick="k('Backspace')">&#9003;</button>
+<label><input type=checkbox id=pw onchange="t.type=this.checked?'password':'text'">hide</label>
+<span id=st></span></div><img id=s tabindex=0>
 <script>
 const s=document.getElementById('s'),st=document.getElementById('st'),t=document.getElementById('t');
-const post=(u,b)=>fetch(u,{method:'POST',body:JSON.stringify(b)});
+let busy=false,again=false;
+const post=(u,b)=>fetch(u,{method:'POST',body:JSON.stringify(b)}).then(refresh);
 function k(key){post('/key',{key})}
-async function loop(){try{const r=await fetch('/shot?'+Date.now());const j=r.headers.get('X-Status');
- if(j)st.textContent=j;s.src=URL.createObjectURL(await r.blob());if(j==='DONE')return;}catch(e){}
- setTimeout(loop,600)}loop();
-s.onclick=e=>{const r=s.getBoundingClientRect();s.focus();
- post('/click',{x:(e.clientX-r.left)*s.naturalWidth/r.width,y:(e.clientY-r.top)*s.naturalHeight/r.height})};
-s.onkeydown=e=>{e.preventDefault();if(e.key.length===1)post('/type',{text:e.key});else post('/key',{key:e.key})};
-t.onkeydown=e=>{if(e.key==='Enter'){post('/type',{text:t.value}).then(()=>k('Enter'));t.value=''}};
+function send(enter){const v=t.value;t.value='';post('/type',{text:v,enter})}
+t.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();send(true)}};
+async function refresh(){if(busy){again=true;return}busy=true;
+ try{const r=await fetch('/shot?'+Date.now());const j=r.headers.get('X-Status');if(j)st.textContent=j;
+  const u=URL.createObjectURL(await r.blob());s.onload=()=>URL.revokeObjectURL(u);s.src=u;
+  if(j==='DONE'){st.textContent='DONE - signed in, you can close this tab';busy=false;return 'done'}}catch(e){}
+ busy=false;if(again){again=false;refresh()}}
+setInterval(()=>{if(!document.hidden)refresh()},1500);refresh();
+s.onclick=e=>{const r=s.getBoundingClientRect();
+ post('/click',{x:(e.clientX-r.left)*s.naturalWidth/r.width,y:(e.clientY-r.top)*s.naturalHeight/r.height});t.focus()};
 </script>"""
 
 
 def cmd_login(args):
-    """Sign in without any visible window: headless Chrome + a tiny web remote-control page.
+    """Sign in without any visible window: headless real Chrome + a tiny web remote page.
     Open http://127.0.0.1:<port>/ in any browser (on a VM: `ssh -L <port>:127.0.0.1:<port> vm`)."""
-    from playwright.sync_api import sync_playwright
-    os.makedirs(HOME, exist_ok=True)
-    shutil.rmtree(PROFILE, ignore_errors=True)
-    pw = sync_playwright().start()
-    ctx = pw.chromium.launch_persistent_context(PROFILE, **launch_kwargs((1000, 760)))
-    page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.goto(args.url)
+    if _port_open(int(open(PORT_FILE).read() or 0) if os.path.exists(PORT_FILE) else 0):
+        sys.exit("Chrome is already running (aistudio serve?). Stop it first: aistudio stop")
+    ch = Chrome(PROFILE, PORT_FILE, size=(900, 680))
+    tab = ch.new_tab(args.url)
     state = {"done": False}
 
     class H(BaseHTTPRequestHandler):
@@ -114,59 +117,56 @@ def cmd_login(args):
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path.startswith("/shot"):
-                p = ctx.pages[-1]
-                ck = ctx.cookies()
-                st = p.url[:60]
-                if _logged_in(ck) and args.done_host in p.url:
-                    _save_cookies(ck, keep_profile=True)
+            if not self.path.startswith("/shot"):
+                return self._send(LOGIN_HTML.encode(), "text/html; charset=utf-8")
+            img, url = tab.screenshot(), tab.url() or ""
+            st = url[:70]
+            if args.done_host in url:
+                ck = ch.cookies()
+                if _logged_in(ck):
+                    _save_cookies(ck)
                     state["done"] = True
                     st = "DONE"
-                self._send(p.screenshot(type="jpeg", quality=60), "image/jpeg", {"X-Status": st})
-            else:
-                self._send(LOGIN_HTML.encode(), "text/html; charset=utf-8")
+            self._send(img, "image/jpeg", {"X-Status": st})
 
         def do_POST(self):
             req = json.loads(self.rfile.read(int(self.headers["Content-Length"])) or b"{}")
-            p = ctx.pages[-1]
             if self.path == "/click":
-                p.mouse.click(req["x"], req["y"])
+                tab.click(req["x"], req["y"])
+                time.sleep(0.25)
             elif self.path == "/type":
-                p.keyboard.type(req["text"])
+                if req.get("text"):
+                    tab.insert_text(req["text"])
+                if req.get("enter"):
+                    tab.key("Enter")
+                time.sleep(0.4)
             elif self.path == "/key":
-                p.keyboard.press(req["key"])
+                tab.key(req["key"])
             self._send(b"ok", "text/plain")
 
     srv = HTTPServer(("127.0.0.1", args.port), H)
     srv.timeout = 1
-    print(f"Open http://127.0.0.1:{args.port}/ and sign in to Google there.\n"
+    print(f"Open http://127.0.0.1:{args.port}/ and sign in there.\n"
           f"(On a remote VM first run on your laptop: ssh -L {args.port}:127.0.0.1:{args.port} <vm>)",
           flush=True)
     deadline = time.time() + args.timeout
-    while not state["done"] and time.time() < deadline:
-        srv.handle_request()
-    for _ in range(3):  # let the page fetch the final DONE frame
-        srv.handle_request()
-    ctx.close()
-    pw.stop()
+    try:
+        while not state["done"] and time.time() < deadline:
+            srv.handle_request()
+        for _ in range(3):  # let the page fetch the final DONE frame
+            srv.handle_request()
+    finally:
+        tab.close()
+        ch.quit()
     if not state["done"]:
         sys.exit("Timed out waiting for sign-in.")
-    print(f"Logged in. Cookies saved to {COOKIES}; headless profile at {PROFILE}")
-
-
-def _save_cookies(ck, keep_profile=False):
-    os.makedirs(HOME, exist_ok=True)
-    fd = os.open(COOKIES, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(ck, f)
-    if not keep_profile:
-        shutil.rmtree(PROFILE, ignore_errors=True)  # re-seed headless profile from cookies
+    print(f"Logged in. Session kept in {PROFILE} (cookies backup: {COOKIES})")
 
 
 def cmd_import_cookies(args):
     data = sys.stdin.read() if args.file == "-" else open(args.file).read()
     ck = json.loads(data)
-    if isinstance(ck, dict) and "cookies" in ck:  # playwright storage_state
+    if isinstance(ck, dict) and "cookies" in ck:  # storage_state-like export
         ck = ck["cookies"]
     for c in ck:  # accept common browser-extension export formats too
         if "expirationDate" in c and "expires" not in c:
@@ -174,106 +174,68 @@ def cmd_import_cookies(args):
         c.setdefault("path", "/")
         ss = str(c.get("sameSite", "Lax")).capitalize()
         c["sameSite"] = {"No_restriction": "None", "Unspecified": "Lax"}.get(ss, ss)
-        for k in list(c):
-            if k not in ("name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"):
-                del c[k]
     _save_cookies(ck)
+    shutil.rmtree(PROFILE, ignore_errors=True)  # next start seeds the profile from cookies
     print(f"{len(ck)} cookies imported. Logged in: {_logged_in(ck)}")
 
 
 def cmd_export_cookies(args):
-    print(open(COOKIES).read())
+    ch = open_chrome()
+    ck = ch.cookies()
+    if ch.proc:
+        ch.quit()
+    _save_cookies(ck)
+    print(json.dumps(ck))
 
 
-# ---------------------------------------------------------------- browser
+# ---------------------------------------------------------------- chat
 
-class Studio:
-    """One headless browser; each ask() runs in its own tab, so asks run concurrently."""
+JS_BOX = "document.querySelector(\"ms-prompt-input-wrapper textarea, textarea[aria-label*='prompt' i]\")"
+JS_RUN = "document.querySelector(\"ms-run-button button, button[aria-label='Run']\")"
 
-    @classmethod
-    async def start(cls, headless=True):
-        from playwright.async_api import async_playwright
-        if not os.path.exists(COOKIES):
-            raise SystemExit(f"Not logged in: {COOKIES} missing. Run `aistudio.py login` first.")
-        self = cls()
-        self._pw = await async_playwright().start()
-        fresh = not os.path.exists(PROFILE)
-        kw = launch_kwargs()
-        kw["headless"] = kw["headless"] and headless
-        self.ctx = await self._pw.chromium.launch_persistent_context(PROFILE, **kw)
-        if fresh:
-            await self.ctx.add_cookies(json.load(open(COOKIES)))
-        return self
 
-    async def close(self):
-        await self.ctx.close()
-        await self._pw.stop()
+def _js_str(s):
+    return json.dumps(s)
 
-    async def ask(self, prompt, model=DEFAULT_MODEL, system=None, timeout=600):
-        page = await self.ctx.new_page()
-        try:
-            return await asyncio.wait_for(self._ask(page, prompt, model, system), timeout)
-        finally:
-            await page.close()
 
-    async def _ask(self, page, prompt, model, system):
-        resps = []
-        page.on("response", lambda r: resps.append(r) if GEN_RPC in r.url else None)
-        await page.goto(f"{BASE}/prompts/new_chat?model={model}", wait_until="domcontentloaded")
-        if "accounts.google.com" in page.url:
-            raise RuntimeError("Session expired: run `aistudio.py login` again.")
-        box = page.locator("ms-prompt-input-wrapper textarea, textarea[aria-label*='prompt' i]").first
-        await box.wait_for(timeout=60000)
-        await self._dismiss_dialogs(page)
+def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
+    tab = ch.new_tab(f"{BASE}/prompts/new_chat?model={model}")
+    try:
+        tab.wait_js(f"!!{JS_BOX} || location.host.startsWith('accounts.')", timeout=90)
+        if "accounts.google.com" in (tab.url() or ""):
+            raise RuntimeError("Session expired: run `aistudio login` again.")
+        # close onboarding/announcement dialogs if any
+        tab.c.eval("""for (const b of document.querySelectorAll('button')) {
+            const t=(b.innerText||b.getAttribute('aria-label')||'').trim();
+            if (/^(Got it|Dismiss|No thanks|Close)$/i.test(t) && b.offsetParent) b.click(); }""")
         if system:
-            await self._set_system(page, system)
-        await box.fill(prompt)
-        run = page.locator("ms-run-button button, button[aria-label='Run']").first
-        for _ in range(120):
-            if await run.is_enabled():
-                break
-            await page.wait_for_timeout(250)
-        await run.click()
-        t0 = time.time()
-        while not resps:
-            if time.time() - t0 > 60:
-                raise RuntimeError("Run did not start (quota? dialog?). " + await self._error_text(page))
-            await page.wait_for_timeout(250)
-        resp = resps[-1]
-        raw = await resp.text()  # waits for the streamed body to finish
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status}: {raw[:500]}")
+            tab.c.eval("""(()=>{const b=[...document.querySelectorAll('button')].find(b=>
+                /System instructions/i.test(b.innerText||b.getAttribute('aria-label')||''));
+                if(b) b.click();})()""")
+            tab.wait_js("!!document.querySelector(\"textarea[aria-label*='System instructions' i]\")", 15)
+            tab.c.eval(_fill_js("document.querySelector(\"textarea[aria-label*='System instructions' i]\")",
+                                system))
+        tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)
+        tab.wait_js(f"{JS_RUN} && !{JS_RUN}.disabled", timeout=60)
+        status, raw = tab.capture_response(GEN_RPC, lambda: tab.c.eval(f"{JS_RUN}.click()"),
+                                           timeout=timeout)
+        if status != 200:
+            raise RuntimeError(f"HTTP {status}: {raw[:300]}")
         text = parse_generate(raw)
         if not text.strip():
-            raise RuntimeError("Empty answer. " + await self._error_text(page))
+            err = tab.c.eval("(document.querySelector('ms-callout, .error, [role=alert]')||{}).innerText||''")
+            raise RuntimeError(f"Empty answer (quota/safety?). {err or raw[:300]}")
         return text
+    finally:
+        tab.close()
 
-    @staticmethod
-    async def _dismiss_dialogs(page):
-        for sel in ("button:has-text('Got it')", "button:has-text('Dismiss')",
-                    "button[aria-label='Close']"):
-            try:
-                b = page.locator(sel).first
-                if await b.is_visible():
-                    await b.click(timeout=1000)
-            except Exception:
-                pass
 
-    @staticmethod
-    async def _set_system(page, system):
-        await page.locator("button:has-text('System instructions'), "
-                           "[aria-label*='System instructions' i]").first.click()
-        ta = page.locator("textarea[aria-label*='System instructions' i], "
-                          "ms-system-instructions textarea").first
-        await ta.fill(system)
-        await page.keyboard.press("Escape")
-
-    @staticmethod
-    async def _error_text(page):
-        try:
-            return (await page.locator(".error, ms-callout, [role=alert]").first.inner_text(timeout=1000))[:300]
-        except Exception:
-            return ""
+def _fill_js(el, text):
+    """Set a textarea value the way Angular notices (native setter + input event)."""
+    return f"""(()=>{{const e={el}; const v={_js_str(text)};
+        const set=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
+        e.focus(); set.call(e, v); e.dispatchEvent(new Event('input',{{bubbles:true}}));
+        e.dispatchEvent(new Event('change',{{bubbles:true}})); return e.value.length;}})()"""
 
 
 def parse_generate(raw):
@@ -308,46 +270,6 @@ def parse_generate(raw):
     return "".join(out)
 
 
-# ---------------------------------------------------------------- daemon
-
-def _daemon_alive():
-    try:
-        with socket.create_connection(("127.0.0.1", PORT), timeout=0.5):
-            return True
-    except OSError:
-        return False
-
-
-def cmd_serve(args):
-    loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
-    studio = asyncio.run_coroutine_threadsafe(Studio.start(not args.headed), loop).result()
-    sem = asyncio.Semaphore(args.tabs)
-
-    async def guarded(req):
-        async with sem:
-            return await studio.ask(req["prompt"], req.get("model") or DEFAULT_MODEL, req.get("system"))
-
-    class H(BaseHTTPRequestHandler):
-        def log_message(self, *a):
-            pass
-
-        def do_POST(self):
-            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            try:
-                res = {"text": asyncio.run_coroutine_threadsafe(guarded(req), loop).result()}
-            except Exception as e:
-                res = {"error": str(e) or type(e).__name__}
-            body = json.dumps(res).encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-    log(f"serving on 127.0.0.1:{PORT} with {args.tabs} parallel tabs")
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
-
-
 def build_prompt(text, files):
     parts = []
     for f in files or []:
@@ -357,44 +279,55 @@ def build_prompt(text, files):
     return "\n\n".join(parts)
 
 
-def _ask_daemon(prompt, model, system):
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{PORT}/", method="POST",
-        data=json.dumps({"prompt": prompt, "model": model, "system": system}).encode())
-    res = json.load(urllib.request.urlopen(req, timeout=900))
-    if "error" in res:
-        raise RuntimeError(res["error"])
-    return res["text"]
+def ask_many(jobs, jobs_n=3, retries=2):
+    """jobs: list of (prompt, model, system). Returns list of text or Exception.
+    Runs up to jobs_n tabs in parallel in one Chrome."""
+    ch = open_chrome()
+    owned = ch.proc is not None  # we started it -> we stop it
 
+    def one(job):
+        prompt, model, system = job
+        for attempt in range(retries + 1):
+            try:
+                return ask_tab(ch, prompt, model or DEFAULT_MODEL, system)
+            except Exception as e:
+                if attempt == retries or "login" in str(e):
+                    return e
+                log(f"attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
+                time.sleep(5 * (attempt + 1))
 
-async def ask_many(jobs, jobs_n=3, retries=2):
-    """jobs: list of (prompt, model, system). Returns list of text or Exception."""
-    use_daemon = _daemon_alive()
-    studio = None if use_daemon else await Studio.start()
-    sem = asyncio.Semaphore(jobs_n)
-
-    async def one(prompt, model, system):
-        async with sem:
-            for attempt in range(retries + 1):
-                try:
-                    if use_daemon:
-                        return await asyncio.to_thread(_ask_daemon, prompt, model, system)
-                    return await studio.ask(prompt, model, system)
-                except Exception as e:
-                    if attempt == retries or "login" in str(e):
-                        return e
-                    log(f"attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
-                    await asyncio.sleep(5)
     try:
-        return await asyncio.gather(*(one(*j) for j in jobs))
+        with ThreadPoolExecutor(max(1, jobs_n)) as ex:
+            return list(ex.map(one, jobs))
     finally:
-        if studio:
-            await studio.close()
+        if owned:
+            ch.quit()
+
+
+def cmd_serve(args):
+    ch = open_chrome()
+    if not ch.proc:
+        print(f"Chrome already running on port {ch.port}")
+        return
+    print(f"Chrome running on port {ch.port}; `aistudio stop` to stop.", flush=True)
+    try:
+        ch.proc.wait()
+    except KeyboardInterrupt:
+        ch.quit()
+
+
+def cmd_stop(args):
+    if os.path.exists(PORT_FILE):
+        ch = Chrome.__new__(Chrome)
+        ch.port_file, ch.proc = PORT_FILE, None
+        ch.port = int(open(PORT_FILE).read() or 0)
+        ch.quit()
+    print("stopped")
 
 
 def cmd_ask(args):
     text = sys.stdin.read() if args.prompt == "-" else args.prompt
-    ans = asyncio.run(ask_many([(build_prompt(text, args.file), args.model, args.system)]))[0]
+    ans = ask_many([(build_prompt(text, args.file), args.model, args.system)])[0]
     if isinstance(ans, Exception):
         sys.exit(f"ERROR: {ans or type(ans).__name__}")
     if args.out:
@@ -406,10 +339,9 @@ def cmd_ask(args):
 
 def cmd_batch(args):
     """jsonl lines: {"id":..., "prompt":..., "model"?:..., "files"?:[...]} -> results jsonl."""
-    jobs = [json.loads(l) for l in open(args.file) if l.strip()]
-    res = asyncio.run(ask_many(
-        [(build_prompt(j["prompt"], j.get("files")), j.get("model", args.model), j.get("system"))
-         for j in jobs], args.jobs))
+    jobs = [json.loads(line) for line in open(args.file) if line.strip()]
+    res = ask_many([(build_prompt(j["prompt"], j.get("files")), j.get("model", args.model),
+                     j.get("system")) for j in jobs], args.jobs)
     for j, r in zip(jobs, res):
         out = {"id": j.get("id")}
         out.update({"error": str(r) or type(r).__name__} if isinstance(r, Exception) else {"text": r})
@@ -488,7 +420,7 @@ def cmd_code(args):
         prompt = (f"<ap_spec>\n{spec}\n</ap_spec>\n\n<codebase>\n{ctx}\n</codebase>\n\n"
                   f"{CODE_RULES}\n\nTASK:\n{task}\n{history}")
         log(f"round {rnd}: asking {args.model} ({len(prompt)} chars of context)")
-        ans = asyncio.run(ask_many([(prompt, args.model, None)]))[0]
+        ans = ask_many([(prompt, args.model, None)])[0]
         if isinstance(ans, Exception):
             sys.exit(f"ERROR: {ans}")
         patch = extract_patch(ans)
@@ -521,6 +453,72 @@ def cmd_code(args):
 
 
 
+# ---------------------------------------------------------------- router gate
+
+ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve")
+
+
+def check_router_command(cmd):
+    """Return None if `cmd` is an allowed router command, else the reason it is not.
+
+    A router model may run exactly one `aistudio <subcommand> ...` per call and nothing
+    else: no chaining, pipes, redirects (except `<` from a file), substitutions or
+    multi-line scripts, so it cannot write or run code of its own."""
+    import shlex
+    c = cmd.strip()
+    if "\n" in c or "\r" in c:
+        return "multi-line commands are not allowed"
+    for bad in (";", "&&", "||", "|", ">", "`", "$(", "<(", "<<"):
+        if bad in c:
+            return f"shell operator {bad!r} is not allowed"
+    if c.endswith("&"):
+        c = c[:-1].rstrip()
+        if "&" in c:
+            return "only a single trailing & is allowed"
+    elif "&" in c:
+        return "'&' is not allowed"
+    try:
+        argv = shlex.split(c)
+    except ValueError as e:
+        return f"unparsable command: {e}"
+    while argv and "=" in argv[0] and argv[0].split("=")[0].isidentifier():
+        if not argv[0].startswith("AISTUDIO_"):
+            return "only AISTUDIO_* environment assignments are allowed"
+        argv = argv[1:]
+    if not argv or os.path.basename(argv[0]) not in ("aistudio", "aistudio.py"):
+        return "only the `aistudio` command is allowed"
+    if len(argv) < 2 or argv[1] not in ROUTER_SUBCMDS:
+        return f"allowed subcommands: {', '.join(ROUTER_SUBCMDS)}"
+    return None
+
+
+def cmd_guard(args):
+    """PreToolUse hook (Claude Code JSON on stdin). Exit 2 blocks the tool call."""
+    try:
+        ev = json.load(sys.stdin)
+    except Exception:
+        print("router gate: bad hook input", file=sys.stderr)
+        sys.exit(2)
+    tool = ev.get("tool_name", "")
+    if tool != "Bash":
+        print(f"ROUTER GATE: tool {tool} is forbidden. You are a router: only run "
+              "`aistudio ...` commands; Gemini does all thinking and writing.", file=sys.stderr)
+        sys.exit(2)
+    why = check_router_command((ev.get("tool_input") or {}).get("command", ""))
+    if why:
+        print(f"ROUTER GATE: {why}. You are a router, not a worker: run exactly one "
+              "`aistudio ask|code|batch|status` command per call and pass the task verbatim.",
+              file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
+
+
+def cmd_status(args):
+    ok = os.path.exists(COOKIES) and _logged_in(json.load(open(COOKIES)))
+    print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}")
+    sys.exit(0 if ok else 1)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -534,8 +532,8 @@ def main():
     s = sub.add_parser("ask"); s.add_argument("prompt"); s.add_argument("-f", "--file", action="append")
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.add_argument("-s", "--system")
     s.add_argument("-o", "--out"); s.set_defaults(fn=cmd_ask)
-    s = sub.add_parser("serve"); s.add_argument("--tabs", type=int, default=3)
-    s.add_argument("--headed", action="store_true"); s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("serve", help="keep a warm Chrome running"); s.set_defaults(fn=cmd_serve)
+    s = sub.add_parser("stop", help="stop the warm Chrome"); s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
@@ -545,6 +543,9 @@ def main():
     s.add_argument("--test-timeout", type=int, default=900)
     s.add_argument("-r", "--rounds", type=int, default=4)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
+    s = sub.add_parser("guard", help="PreToolUse hook that gates router models")
+    s.set_defaults(fn=cmd_guard)
+    s = sub.add_parser("status"); s.set_defaults(fn=cmd_status)
     a = p.parse_args()
     a.fn(a)
 

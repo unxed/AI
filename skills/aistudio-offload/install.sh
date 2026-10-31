@@ -1,25 +1,29 @@
 #!/usr/bin/env bash
-# Install aistudio-offload: a Python venv with Playwright + headless Chromium.
+# Install aistudio-offload: a tiny Python venv (websockets) + Google Chrome.
+# No Playwright/Selenium on purpose: Google detects them (sign-in is rejected and
+# the account could be rate-limited). We drive a real Chrome over raw CDP instead.
 # Works on small cloud VMs (tested on GCP e2-micro, 1 GB RAM, Ubuntu 24.04).
-#   ./install.sh            -> venv in ~/.aistudio/venv, wrapper in ~/.local/bin/aistudio
+#   ./install.sh   -> venv in ~/.aistudio/venv, wrapper in ~/.local/bin/aistudio
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 VENV="${AISTUDIO_HOME:-$HOME/.aistudio}/venv"
 
-if ! python3 -m venv --help >/dev/null 2>&1 || ! python3 -c 'import ensurepip' 2>/dev/null; then
+if ! python3 -c 'import ensurepip' 2>/dev/null; then
   sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
 fi
 python3 -m venv "$VENV"
-"$VENV/bin/pip" install -q --upgrade pip playwright
+"$VENV/bin/pip" install -q --upgrade pip websockets
 
-# Headless shell is ~half the size/RAM of full Chromium; enough for AI Studio.
-if [ -n "${AISTUDIO_CHROME:-}" ]; then
-  echo "Using AISTUDIO_CHROME=$AISTUDIO_CHROME"
-elif sudo -n true 2>/dev/null; then
-  "$VENV/bin/playwright" install --with-deps --only-shell chromium
-else
-  "$VENV/bin/playwright" install --only-shell chromium
-  echo "No sudo: if Chromium fails to start, ask an admin to run: $VENV/bin/playwright install-deps chromium"
+if [ -z "${AISTUDIO_CHROME:-}" ] && ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+  if sudo -n true 2>/dev/null && command -v apt-get >/dev/null; then
+    tmp=$(mktemp -d)
+    curl -fsSL -o "$tmp/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    sudo apt-get install -y -qq "$tmp/chrome.deb"
+    rm -rf "$tmp"
+  else
+    echo "Please install Google Chrome (or set AISTUDIO_CHROME=/path/to/chrome)." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$HOME/.local/bin"
@@ -29,7 +33,7 @@ exec "$VENV/bin/python" "$HERE/aistudio.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/aistudio"
 
-# Small VMs: make sure there is some swap, Chromium + AI Studio peak around 600-800 MB.
+# Small VMs: Chrome + AI Studio peak around 400-700 MB, make sure there is swap.
 mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo)
 swap_kb=$(awk '/SwapTotal/{print $2}' /proc/meminfo)
 if [ "$mem_kb" -lt 2000000 ] && [ "$swap_kb" -lt 1000000 ]; then
