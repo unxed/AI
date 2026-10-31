@@ -67,7 +67,7 @@ DONE_HOST = "aistudio.google.com"
 
 def log(*a):
     if os.environ.get("AISTUDIO_QUIET") != "1":
-        print("[aistudio]", *a, file=sys.stderr, flush=True)
+        print(f"[{PROG}]", *a, file=sys.stderr, flush=True)
 
 
 def _logged_in(cookies):
@@ -664,7 +664,7 @@ def cmd_guard(args):
 
 
 def cmd_status(args):
-    ok = os.path.exists(COOKIES) and logged_in(json.load(open(COOKIES)))
+    ok = bool(logged_in(json.load(open(COOKIES)) if os.path.exists(COOKIES) else []))
     print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}"
           + (f" tiers={TIERS}" if is_gemini() else ""))
     sys.exit(0 if ok else 1)
