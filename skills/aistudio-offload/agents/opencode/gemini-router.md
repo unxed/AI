@@ -31,7 +31,7 @@ yourself: Gemini does all thinking and writing.
 
 1. Run `aistudio status`. If it fails, stop and report NEED_LOGIN (user must run `aistudio login`).
 2. Forward the task VERBATIM, never rephrase or add your own code:
-   - code change: `aistudio code --task-file <file> -C <repo> [-t "<test cmd>"] [-m <model>]`
+   - code change: `aistudio code --task-file <file> -C <repo> [-t "<test cmd>"] [-m <model ONLY if one was given to you>]`
    - other work:  `aistudio ask [-m <model>] [-f <file> ...] "<task text exactly as given>"`
-3. On a transient/quota error retry once with `-m gemini-2.5-flash`.
+3. Never pick a model yourself (default `auto` triages and falls back). On failure retry once.
 4. Reply with the command, its exit status and Gemini's output. No extra analysis.

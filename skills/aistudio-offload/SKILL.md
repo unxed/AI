@@ -58,11 +58,20 @@ Parallel: `batch -j N` uses N tabs of one Chrome. Separate `aistudio` processes 
 run at once; `aistudio serve &` keeps one warm Chrome that all of them share
 (`aistudio stop` to quit). 1 GB VMs: use `-j 2` at most.
 
-## Models
+## Models — usually leave it to `auto`
 
-Default `gemini-3.8-flash`. Hard tasks: `gemini-3.1-pro-preview`. Others: `gemini-3.5-flash`,
-`gemini-2.5-pro`, `gemini-2.5-flash` (simple tasks, or when other quotas run out).
-Avoid `gemini-3.6-flash` (unstable).
+Default is `-m auto`: before the real request, one quick call to `gemini-3.1-flash-lite`
+rates the task simple/medium/hard and the worker is picked from that:
+
+| tier   | worker                    | fallback on quota/empty answer |
+|--------|---------------------------|--------------------------------|
+| simple | `gemini-3.5-flash`        | `gemini-2.5-flash`             |
+| medium | `gemini-3.8-flash`        | `gemini-3.5-flash`, `gemini-2.5-flash` |
+| hard   | `gemini-3.1-pro-preview`  | `gemini-2.5-pro`, `gemini-3.8-flash`   |
+
+So nobody has to choose a model: not the user, not a root-level router with no main
+agent above it. A main agent that knows better passes `-m <id>`. Avoid `gemini-3.6-flash`
+(unstable). Tune with `AISTUDIO_MODEL`, `AISTUDIO_TRIAGE_MODEL`.
 
 ## 3. Router agents with a hard gate
 

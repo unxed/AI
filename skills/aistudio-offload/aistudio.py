@@ -32,7 +32,27 @@ HOME = os.path.expanduser(os.environ.get("AISTUDIO_HOME", "~/.aistudio"))
 COOKIES = os.path.join(HOME, "cookies.json")
 PROFILE = os.path.join(HOME, "profile")
 PORT_FILE = os.path.join(HOME, "chrome.port")
-DEFAULT_MODEL = os.environ.get("AISTUDIO_MODEL", "gemini-3.8-flash")
+DEFAULT_MODEL = os.environ.get("AISTUDIO_MODEL", "auto")
+# `-m auto`: a quick triage call to a small Gemini picks the worker by difficulty.
+TIERS = {"simple": "gemini-3.5-flash", "medium": "gemini-3.8-flash", "hard": "gemini-3.1-pro-preview"}
+TRIAGE_MODEL = os.environ.get("AISTUDIO_TRIAGE_MODEL", "gemini-3.1-flash-lite")
+# on quota/empty answers try the next model of the chain instead of hammering the same one
+FALLBACK = {"gemini-3.1-pro-preview": ["gemini-2.5-pro", "gemini-3.8-flash"],
+            "gemini-3.8-flash": ["gemini-3.5-flash", "gemini-2.5-flash"],
+            "gemini-3.5-flash": ["gemini-2.5-flash", "gemini-3.8-flash"],
+            "gemini-2.5-pro": ["gemini-3.8-flash"], "gemini-2.5-flash": ["gemini-3.5-flash"]}
+TRIAGE_PROMPT = """You route tasks to LLMs. Rate how hard the TASK below is for a strong LLM.
+simple = factual question, short rewrite/translation, trivial or boilerplate code;
+medium = typical coding task: a feature or bugfix in a few files, a review, a plan;
+hard = tricky algorithms, cross-cutting multi-file design, concurrency/security/perf
+subtleties, proofs, or anything needing long careful reasoning.
+The full prompt is {n} characters long (larger context = harder).
+Reply with exactly one word: simple, medium or hard.
+
+TASK (tail of the prompt):
+<<<
+{tail}
+>>>"""
 BASE = "https://aistudio.google.com"
 GEN_RPC = "MakerSuiteService/GenerateContent"
 PROG = "aistudio"  # provider wrappers (e.g. grok-offload) override these globals
@@ -286,6 +306,22 @@ def build_prompt(text, files):
     return "\n\n".join(parts)
 
 
+def choose_model(ch, prompt):
+    """Pick a worker model for `prompt` with one fast triage call (no user input,
+    no tokens from the calling agent). Falls back to the medium tier."""
+    try:
+        ans = ask_tab(ch, TRIAGE_PROMPT.format(n=len(prompt), tail=prompt[-6000:]),
+                      TRIAGE_MODEL, timeout=120)
+        tier = next((t for t in ("hard", "medium", "simple") if t in ans.lower()), "medium")
+    except Exception as e:
+        log(f"triage failed ({e}); using medium tier")
+        tier = "medium"
+    if len(prompt) > 600_000 and tier == "simple":
+        tier = "medium"
+    log(f"auto model: {tier} -> {TIERS[tier]}")
+    return TIERS[tier]
+
+
 def ask_many(jobs, jobs_n=3, retries=2):
     """jobs: list of (prompt, model, system). Returns list of text or Exception.
     Runs up to jobs_n tabs in parallel in one Chrome."""
@@ -294,13 +330,18 @@ def ask_many(jobs, jobs_n=3, retries=2):
 
     def one(job):
         prompt, model, system = job
+        model = model or DEFAULT_MODEL
+        if model == "auto" and globals()["ask_tab"] is ask_tab:  # Gemini only; Grok has its own auto
+            model = choose_model(ch, prompt)
+        chain = [model] + FALLBACK.get(model, [])
         for attempt in range(retries + 1):
+            m = chain[min(attempt, len(chain) - 1)]
             try:
-                return globals()["ask_tab"](ch, prompt, model or DEFAULT_MODEL, system)
+                return globals()["ask_tab"](ch, prompt, m, system)
             except Exception as e:
                 if attempt == retries or "login" in str(e):
                     return e
-                log(f"attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
+                log(f"{m}: attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
                 time.sleep(5 * (attempt + 1))
 
     try:
@@ -523,7 +564,7 @@ def cmd_guard(args):
 
 def cmd_status(args):
     ok = os.path.exists(COOKIES) and logged_in(json.load(open(COOKIES)))
-    print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}")
+    print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL} tiers={TIERS}")
     sys.exit(0 if ok else 1)
 
 

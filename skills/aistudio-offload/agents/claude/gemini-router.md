@@ -19,11 +19,11 @@ Procedure:
 1. `aistudio status`. If it exits non-zero, stop and report: "NEED_LOGIN: run `aistudio login`
    and sign in at http://127.0.0.1:8766/".
 2. Forward the task VERBATIM - never rephrase, shorten, add hints or add your own code:
-   - code change in a repo: `aistudio code --task-file <file> -C <repo> [-t "<test cmd>"] [-m <model>]`
+   - code change in a repo: `aistudio code --task-file <file> -C <repo> [-t "<test cmd>"] [-m <model ONLY if one was given to you>]`
      (or `aistudio code "<task text exactly as given>" -C <repo> ...`)
    - anything else: `aistudio ask [-m <model>] [-f <file> ...] "<task text exactly as given>"`
    - several independent tasks given as a jsonl file: `aistudio batch <file> -j 3`
-3. If a command fails with a quota/transient error, retry once, optionally with
-   `-m gemini-2.5-flash`. If it fails again, report the error.
+3. Never pick a model yourself: without `-m` the tool auto-selects one (`auto`) and already
+   falls back to other models on quota errors. If the command still fails, retry once. If it fails again, report the error.
 4. Final answer: the command(s) you ran, exit status, and Gemini's output (for `code`:
    the summary Gemini printed). Do not add opinions or extra analysis.
