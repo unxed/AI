@@ -32,6 +32,8 @@ The main agent decides *what* to do and *which Gemini model*; the router does th
 aistudio status                                # logged_in=True ?
 ```
 
+Клон перемещён (например, `~/AI-repo` -> `~/dev/AI`): обёртки в `~/.local/bin` запоминают путь при установке, поэтому перезапустить `install.sh` из нового места клона; симлинки `~/.claude/skills/<скилл>` пересоздать вручную: `ln -sfn <клон>/skills/<скилл> ~/.claude/skills/<скилл>`.
+
 Not logged in → run `aistudio login` (in the background) and tell the user:
 
 > Open http://127.0.0.1:8766/ and sign in to Google there: click a field in the picture,
@@ -41,6 +43,8 @@ Not logged in → run `aistudio login` (in the background) and tell the user:
 It finishes by itself with `Logged in.`. Never type the user's password yourself.
 Alternative: `aistudio export-cookies > c.json` on a logged-in machine, copy the file,
 `aistudio import-cookies c.json` on the other (it is a secret; delete it after).
+
+**Режим разрешений (auto mode)**: в режиме auto классификатор Claude Code может блокировать отправку кода в AI Studio как "Data Exfiltration", даже если пользователь это разрешил; работает только режим bypass permissions. Оркестратор: если вызов `aistudio` заблокирован классификатором, не обходить блокировку, а сообщить пользователю и попросить режим bypass permissions.
 
 ## 1. Code changes — one command does everything
 
@@ -109,6 +113,8 @@ and the integrator applies the files one by one with `ap`; a stream whose patch 
 is repaired with its `afailed.md` as described. Distinct streams must touch distinct files or at
 least distinct snippets.
 
+Если потоки работают во встроенном браузере Claude (инструменты `mcp__Claude_Browser__*` или аналогичные): каждый поток работает в СВОЕЙ вкладке; действовать только по её `tabId`; чужие вкладки не трогать; буфер обмена не использовать для передачи ответов (текст брать через чтение страницы по `tabId`).
+
 ## 2. Anything else
 
 ```bash
@@ -120,7 +126,7 @@ aistudio batch jobs.jsonl -j 3                # {"id":1,"prompt":"...","files":[
 
 Parallel: `batch -j N` uses N tabs of one Chrome. Separate `aistudio` processes can also
 run at once; `aistudio serve &` keeps one warm Chrome that all of them share
-(`aistudio stop` to quit). 1 GB VMs: use `-j 2` at most.
+(`aistudio stop` to quit). 1 GB VMs: use `-j 2` at most. При 3 и более параллельных запусках на одной модели разноси старты: `aistudio batch jobs.jsonl -j 3 --stagger 20` (секунды между стартами). Фактическая модель каждого ответа видна в строке `result: requested_model=... actual_model=...` и в полях `requested_model`/`actual_model` batch-строк.
 
 ## Models — usually leave it to `auto`
 

@@ -34,6 +34,14 @@ fi
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/aistudio" <<EOF
 #!/bin/sh
+if [ ! -e "$VENV/bin/python" ]; then
+  echo "aistudio: клон скилла перемещён или удалён (нет $VENV/bin/python). Перезапусти install.sh из нового места клона." >&2
+  exit 1
+fi
+if [ ! -e "$HERE/aistudio.py" ]; then
+  echo "aistudio: клон скилла перемещён или удалён (нет $HERE/aistudio.py). Перезапусти install.sh из нового места клона." >&2
+  exit 1
+fi
 exec "$VENV/bin/python" "$HERE/aistudio.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/aistudio"
@@ -41,6 +49,10 @@ chmod +x "$HOME/.local/bin/aistudio"
 # `ap` patcher (https://github.com/unxed/ap, vendored): the only patch format used for model-written code.
 cat > "$HOME/.local/bin/ap" <<EOF
 #!/bin/sh
+if [ ! -e "$HERE/vendor/ap.py" ]; then
+  echo "ap: клон скилла перемещён или удалён (нет $HERE/vendor/ap.py). Перезапусти install.sh из нового места клона." >&2
+  exit 1
+fi
 exec python3 "$HERE/vendor/ap.py" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/ap"

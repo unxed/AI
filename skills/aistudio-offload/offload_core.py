@@ -749,7 +749,7 @@ def choose_model(ch, prompt):
     return TIERS[tier]
 
 
-def ask_many(jobs, jobs_n=3, retries=2):
+def ask_many(jobs, jobs_n=3, retries=2, stagger=0):
     """jobs: list of (prompt, model, system). Returns list of text or Exception.
     Runs up to jobs_n tabs in parallel in one Chrome. Every attempt is watched: heartbeat on
     stderr, status file run-<pid>.json (see genwatch), early stop on UI errors and stalls."""
@@ -758,8 +758,17 @@ def ask_many(jobs, jobs_n=3, retries=2):
     runs = get_runs()
 
     dch = _DiagChrome(ch)
+    stagger_lock = threading.Lock()
+    last_start = [0.0]
 
     def one(job, jid=0):
+        if stagger > 0:
+            with stagger_lock:
+                now = time.time()
+                diff = now - last_start[0]
+                if diff < stagger:
+                    time.sleep(stagger - diff)
+                last_start[0] = time.time()
         prompt, model, system = job
         model = model or DEFAULT_MODEL
         ctx = {"command": " ".join(sys.argv), "model_requested": model, "prompt_chars": len(prompt),
@@ -929,7 +938,7 @@ def cmd_batch(args):
     ok = [b for b in built if not isinstance(b, Exception)]
     okidx = {id(j): n for n, j in enumerate(j for j, b in zip(jobs, built) if not isinstance(b, Exception))}
     RESULTS.clear()
-    it = iter(ask_many(ok, args.jobs) if ok else [])
+    it = iter(ask_many(ok, args.jobs, stagger=getattr(args, "stagger", 0)) if ok else [])
     res = [b if isinstance(b, Exception) else next(it) for b in built]
     for j, r in zip(jobs, res):
         out = {"id": j.get("id")}
@@ -1636,7 +1645,7 @@ def main():
     s.set_defaults(fn=cmd_whoami)
     s = sub.add_parser("serve", help="keep a warm Chrome running"); s.set_defaults(fn=cmd_serve)
     s = sub.add_parser("stop", help="stop the warm Chrome"); s.set_defaults(fn=cmd_stop)
-    s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
+    s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3); s.add_argument("--stagger", type=float, default=0, help="seconds between starting parallel jobs (avoids Permission denied on bursts)")
     watch_opts(s)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
