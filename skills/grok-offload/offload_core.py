@@ -572,15 +572,25 @@ Reply with exactly ONE patch in the 'ap' format (spec above), inside a single ``
 Rules: snippets must be copied verbatim from the current files and be unique; prefer small
 REPLACE/INSERT_AFTER edits; create new files with CREATE_FILE (or REPLACE on a new FILE as the
 spec allows); keep the project's code style; add or update tests when it makes sense.
-After the code block you may add at most 5 lines of explanation."""
+After the code block you may add at most 5 lines of explanation.
+NEVER answer with a unified diff / git diff / `--- a/ +++ b/ @@` hunks / whole-file dumps: line
+numbers in diff headers are always miscounted. Only the 'ap' format is accepted."""
+
+DIFF_RE = r"(?m)^(diff --git |--- (a/|/dev/null)|\+\+\+ (b/|/dev/null)|@@ -\d+(,\d+)? \+\d+(,\d+)? @@)"
 
 
 def extract_patch(ans):
     import re
-    m = re.findall(r"```(?:ap|text|diff)?[ \t]*\n(.*?)```", ans, re.S)
+    m = re.findall(r"```(?:ap|text)?[ \t]*\n(.*?)```", ans, re.S)
     if m:
         return max(m, key=len)
     return ans
+
+
+def looks_like_diff(text):
+    """True if the answer is a unified diff, which is forbidden (ap only)."""
+    import re
+    return bool(re.search(DIFF_RE, text))
 
 
 _FAIL_RE = None
@@ -683,15 +693,39 @@ def cmd_code(args):
         if isinstance(ans, Exception):
             sys.exit(f"ERROR: {ans}")
         patch = extract_patch(ans)
+        if looks_like_diff(patch):
+            log(f"round {rnd}: the model answered with a unified diff, which is forbidden")
+            history = ("\nYOUR PREVIOUS ANSWER WAS A UNIFIED DIFF. Diffs are forbidden: the line counts in "
+                       "their headers are always wrong. Nothing was applied. Answer ONLY in the 'ap' "
+                       "format from the spec above, inside one ```ap block.")
+            continue
         pfile = os.path.join(root, ".afix.ap")
+        # the patcher refuses to run while a stale afailed.ap is around
+        for stale in ("afailed.ap", "afailed.md"):
+            if os.path.exists(os.path.join(root, stale)):
+                os.remove(os.path.join(root, stale))
         open(pfile, "w").write(patch)
+        # Tolerant mode (default, no -s): ap self-heals what it can (fuzzy locators, ID drift,
+        # missing header...), applies every modification that resolves and writes the ones that
+        # do not to afailed.ap plus a repair briefing for the model to afailed.md.
         ap = subprocess.run([sys.executable, AP_PY, pfile, "--dir", root],
                             capture_output=True, text=True)
         if ap.returncode != 0:
             err = (ap.stdout + ap.stderr)[-3000:]
-            log(f"round {rnd}: patch failed to apply:\n{err}")
-            history = (f"\nYOUR PREVIOUS PATCH FAILED TO APPLY (files are unchanged):\n"
-                       f"```ap\n{patch}\n```\nPatcher output:\n{err}\nSend a corrected full patch.")
+            log(f"round {rnd}: patch not (fully) applied:\n{err}")
+            brief = os.path.join(root, "afailed.md")
+            if os.path.exists(brief):
+                history = ("\nYOUR PREVIOUS PATCH WAS ONLY PARTLY APPLIED by the ap patcher (the codebase "
+                           "above already contains the modifications that applied). Its repair briefing:\n"
+                           + open(brief, encoding="utf-8").read()[:30000]
+                           + "\nSend a NEW ap patch (ap format only, never a diff) with only the fixes.")
+            else:
+                history = (f"\nYOUR PREVIOUS PATCH FAILED TO APPLY (files are unchanged):\n"
+                           f"```ap\n{patch}\n```\nPatcher output:\n{err}\n"
+                           "Send a corrected full ap patch (never a diff).")
+            for stale in ("afailed.ap", "afailed.md", ".afix.ap"):
+                if os.path.exists(os.path.join(root, stale)):
+                    os.remove(os.path.join(root, stale))
             continue
         os.remove(pfile)
         log(f"round {rnd}: patch applied")
@@ -870,7 +904,7 @@ def main():
     s.add_argument("--ci-branch"); s.add_argument("--ci-base", default="main")
     s.add_argument("--ci-body", help="draft PR description")
     s.add_argument("--test-timeout", type=int, default=1800)
-    s.add_argument("-r", "--rounds", type=int, default=4)
+    s.add_argument("-r", "--rounds", type=int, default=3)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
     s = sub.add_parser("guard", help="PreToolUse hook that gates router models")
     s.set_defaults(fn=cmd_guard)

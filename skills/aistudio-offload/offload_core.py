@@ -904,7 +904,7 @@ def main():
     s.add_argument("--ci-branch"); s.add_argument("--ci-base", default="main")
     s.add_argument("--ci-body", help="draft PR description")
     s.add_argument("--test-timeout", type=int, default=1800)
-    s.add_argument("-r", "--rounds", type=int, default=4)
+    s.add_argument("-r", "--rounds", type=int, default=3)
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
     s = sub.add_parser("guard", help="PreToolUse hook that gates router models")
     s.set_defaults(fn=cmd_guard)
