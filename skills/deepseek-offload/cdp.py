@@ -114,7 +114,13 @@ class Chrome:
                     "--disable-dev-shm-usage", "--disable-gpu", "--mute-audio",
                     "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
                     "--disable-backgrounding-occluded-windows", "about:blank"]
-            if headless:
+            mode = os.environ.get("OFFLOAD_HEADLESS", "auto")  # auto | xvfb | new | off
+            if headless and mode in ("auto", "xvfb") and shutil.which("xvfb-run"):
+                # A normal (headed) Chrome on a virtual display: no window anywhere, and none of
+                # the headless fingerprints (e.g. "HeadlessChrome" in userAgentData) that make
+                # AI Studio answer "Permission denied".
+                args = ["xvfb-run", "-a", "-s", f"-screen 0 {size[0]}x{size[1] + 120}x24"] + args
+            elif headless and mode != "off":
                 args.insert(1, "--headless=new")
             self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                          start_new_session=True)

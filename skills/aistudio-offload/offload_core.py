@@ -325,7 +325,15 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
         if not started:
             err = tab.c.eval("(document.querySelector('ms-callout, .error, [role=alert]')||{}).innerText||''")
             raise RuntimeError(f"Run did not start (quota? dialog?). {err}")
-        tab.wait_js("window.__ofl.done", timeout=timeout, interval=1.0)
+        # done, or an error shown in the model turn (quota, "Permission denied", safety...)
+        # (the XHR may stay open after the answer: complete = the streamed JSON array parses)
+        res = tab.wait_js("""(window.__ofl.done || (()=>{try{JSON.parse(window.__ofl.text);return true}
+            catch(e){return false}})()) ? 'DONE' : (()=>{const t=[...document.querySelectorAll(
+            'ms-chat-turn')].pop(); const e=t && t.querySelector('[class*=error]');
+            return e && e.innerText.trim() ? 'ERR:' + e.innerText.trim() : '';})()""",
+                          timeout=timeout, interval=1.0)
+        if res.startswith("ERR:"):
+            raise RuntimeError(f"AI Studio error: {res[4:][:300]}")
         st = tab.c.eval("window.__ofl")
         raw = st.get("text") or ""
         if st.get("status") not in (200, 0) or not raw:

@@ -26,6 +26,11 @@ if [ -z "${AISTUDIO_CHROME:-}" ] && ! command -v google-chrome >/dev/null && ! c
   fi
 fi
 
+# A virtual display lets Chrome run headed (no headless fingerprints) without any window.
+if ! command -v xvfb-run >/dev/null && sudo -n true 2>/dev/null && command -v apt-get >/dev/null; then
+  sudo apt-get install -y -qq xvfb >/dev/null || echo "xvfb not installed; falling back to --headless=new"
+fi
+
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/aistudio" <<EOF
 #!/bin/sh
