@@ -73,6 +73,8 @@ def test_code_loop_diff_then_partial_then_fixed(tmp_path, monkeypatch):
                ap(("    return 1", "    return 10"), ("    return 999", "    return 0")),
                ap(("    return 2", "    return 20"))]
     prompts = []
+    monkeypatch.setattr(offload_core, "HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(offload_core, "RUNS", offload_core._NoRuns())
 
     def fake(reqs):
         prompts.append(reqs[0][0])

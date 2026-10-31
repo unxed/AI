@@ -24,6 +24,7 @@ permission:
     "deepseek-chat status": allow
     "deepseek-chat status --runs": allow
     "deepseek-chat watch*": allow
+    "deepseek-chat whoami": allow
     "OFFLOAD_CALLER=* deepseek-chat ask *": allow
     "OFFLOAD_CALLER=* deepseek-chat code *": allow
     "OFFLOAD_CALLER=* deepseek-chat batch *": allow

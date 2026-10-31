@@ -117,6 +117,29 @@ Permission denied gets one more try after >= 60 s (it is usually transient); den
 works the exit code is non-zero and the **last stderr line** is `DIAG <REASON> <dir>: <text> [attempts: <model>:
 <kind>; ...]`.
 
+**Model fallback is never silent.** When the requested model fails and the next one of the chain answers, stderr
+says `MODEL FALLBACK: <m> unavailable (<kind>); switching to <next> (requested <req>)` and, on success,
+`WARNING: answered by <actual> INSTEAD OF the requested <req>` plus the final line
+`result: requested_model=<req> actual_model=<actual> fallback=yes|no`. The status file has `requested_model` /
+`actual_model` per job (and on top level), `batch` output lines carry `requested_model`, `actual_model`, `fallback`.
+`--no-fallback` (or `OFFLOAD_NO_FALLBACK=1`) makes `-m` strict: no substitute is tried, the command fails with
+`requested model <req> unavailable (--no-fallback): <reason>` (same-model retries after a rate limit still happen).
+
+**Saved model answers (`code`).** Every round's raw answer is saved and the path is logged:
+`<task-file>.round<N>.ap` (plus `<task-file>.round<N>.afailed.md`, the ap repair briefing, when a patch only
+partly applied). Without `--task-file`, or when the task file lies inside the repo (so `--ci` never commits
+them), the files go to `~/.offload-browser/rounds/<utc>-<pid>/round<N>.ap`. `code --dry-run` asks the model once,
+saves the answer and the extracted patch (`round<N>.patch.ap`), checks it with `ap --dry-run` and prints the
+answer; nothing is applied, exit code 0 only if the patch would apply cleanly.
+
+**Which account?** `mistral-chat whoami (AI Studio engine only; here it exits with a message)` prints the email of the Google account the profile is signed in with (read
+from the AI Studio page; no cookies or tokens; cached in `~/.offload-browser/account-google.txt`, AI Studio only).
+`mistral-chat diag` always starts with `account:`, `default_model:`, `chrome:` (running/not running) and `logged_in`, then
+the last failure bundles.
+
+Heartbeat also covers the pauses between attempts and local work: `waiting: state=between, phase=pause before
+attempt 2: retrying in 30s with <model>` (or `running tests: ...`, `waiting for CI`, `triage: ...`).
+
 **Rule for routers and orchestrators: do not wait silently, do not kill by guess.** While the command runs,
 heartbeat lines must keep coming (or `mistral-chat status --runs` shows `health=ok`). No heartbeat and no status refresh
 for longer than the stall window (120 s by default) = the run is dead: treat it as failed, report

@@ -24,6 +24,7 @@ permission:
     "grok status": allow
     "grok status --runs": allow
     "grok watch*": allow
+    "grok whoami": allow
     "OFFLOAD_CALLER=* grok ask *": allow
     "OFFLOAD_CALLER=* grok code *": allow
     "OFFLOAD_CALLER=* grok batch *": allow

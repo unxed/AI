@@ -300,6 +300,8 @@ def select_model(tab, model):
 
 
 STALL_SECONDS = float(os.environ.get("OFFLOAD_STALL_SECONDS") or 120)
+NO_FALLBACK = os.environ.get("OFFLOAD_NO_FALLBACK") == "1"
+RESULTS = {}  # job index -> {"requested", "actual", "fallback"} of the last ask_many (for batch output)
 HEARTBEAT_SECONDS = float(os.environ.get("OFFLOAD_HEARTBEAT_SECONDS") or 15)
 ATTEMPT_TIMEOUT = float(os.environ.get("OFFLOAD_ATTEMPT_TIMEOUT") or 900)
 # One probe of the page: stream state, error in the model turn or in a banner/toast, the
@@ -758,18 +760,25 @@ def ask_many(jobs, jobs_n=3, retries=2):
         ctx = {"command": " ".join(sys.argv), "model_requested": model, "prompt_chars": len(prompt),
                "files": RUN.get("files"), "t0": time.time()}
         if model == "auto" and is_gemini():  # Gemini only; Grok has its own auto
+            runs.note("triage: choosing the model (auto)")
             model = choose_model(ch, prompt)
-        chain = [model] + FALLBACK.get(model, [])
+        requested = model
+        chain = [model] + ([] if NO_FALLBACK else FALLBACK.get(model, []))
         denied, trail = {}, []
         for attempt in range(retries + 1):
             m = chain[min(attempt, len(chain) - 1)]
             _tls.snap = None
-            att = runs.begin(m, attempt + 1, jid)
+            att = runs.begin(m, attempt + 1, jid, requested)
             genwatch.bind(att)
             try:
                 out = globals()["ask_tab"](dch, prompt, m, system)
                 runs.end(att, "done")
+                RESULTS[jid] = {"requested": requested, "actual": m, "fallback": m != requested}
+                if m != requested:  # never a silent substitution: say it loudly
+                    log(f"WARNING: answered by {m} INSTEAD OF the requested {requested} "
+                        f"(fallback after: {'; '.join(trail)}). Use --no-fallback to fail instead.")
                 log(f"answered by {m}")  # may be a fallback model: name it in reports/PRs
+                log(f"result: requested_model={requested} actual_model={m} fallback={'yes' if m != requested else 'no'}")
                 return out
             except Exception as e:
                 runs.end(att, "failed", e or type(e).__name__)
@@ -788,15 +797,23 @@ def ask_many(jobs, jobs_n=3, retries=2):
                     r = attach_diag(e, ctx, getattr(_tls, "snap", None))
                     if no_model and attempt < retries:
                         log(f"{m}: Permission denied, and there is no other model to try")
+                    if NO_FALLBACK and m == requested:
+                        r.args = (f"requested model {requested} unavailable (--no-fallback): {e}",)
+                        if getattr(r, "diag_line", None):
+                            r.diag_line += " [--no-fallback: no substitute model tried]"
+                    RESULTS[jid] = {"requested": requested, "actual": None, "fallback": False}
                     if len(trail) > 1 or no_model:
                         r.diag_line = f"{getattr(r, 'diag_line', '') or e} [attempts: {'; '.join(trail)}]"
                     return r
+                if nxt != m:
+                    log(f"MODEL FALLBACK: {m} unavailable ({kind}); switching to {nxt} (requested {requested})")
                 if isinstance(e, StallError):  # keep evidence of each stall, then retry in a fresh tab
                     ctx["model_selected"] = m
                     _, sd = write_diag(e, ctx, getattr(_tls, "snap", None), "STALLED")
                     log(f"{m}: STALLED, diagnostics in {sd}")
                 log(f"{m}: attempt {attempt + 1} failed ({kind}): {e or type(e).__name__}; "
                     f"retrying in {pause}s with {nxt}")
+                runs.note(f"pause before attempt {attempt + 2}: retrying in {pause}s with {nxt}")
                 time.sleep(pause)
             finally:
                 genwatch.bind(None)
@@ -832,13 +849,15 @@ def cmd_stop(args):
 
 def set_stall(args):
     """Apply --stall / --heartbeat / --attempt-timeout (generation watch options)."""
-    global STALL_SECONDS, HEARTBEAT_SECONDS, ATTEMPT_TIMEOUT
+    global STALL_SECONDS, HEARTBEAT_SECONDS, ATTEMPT_TIMEOUT, NO_FALLBACK
     if getattr(args, "stall", None):
         STALL_SECONDS = float(args.stall)
     if getattr(args, "heartbeat", None):
         HEARTBEAT_SECONDS = float(args.heartbeat)
     if getattr(args, "attempt_timeout", None):
         ATTEMPT_TIMEOUT = float(args.attempt_timeout)
+    if getattr(args, "no_fallback", False):
+        NO_FALLBACK = True
 
 
 def watch_opts(s):
@@ -846,6 +865,9 @@ def watch_opts(s):
                    help="seconds with no output growth and no generation indicator = STALLED (default 120)")
     s.add_argument("--heartbeat", type=float, help="seconds between stderr heartbeat lines (default 15)")
     s.add_argument("--attempt-timeout", type=float, help="max seconds for one attempt (default 900)")
+    s.add_argument("--no-fallback", action="store_true",
+                   help="strict -m: if the requested model is unavailable fail instead of switching to a "
+                        "fallback model (also OFFLOAD_NO_FALLBACK=1)")
 
 
 def cmd_runs(args, follow=False):
@@ -896,12 +918,17 @@ def cmd_batch(args):
             built.append(attach_diag(e, {"command": f"batch job {j.get('id')}", "prompt_chars": e.total},
                                      reason="CONTEXT_TOO_LARGE"))
     ok = [b for b in built if not isinstance(b, Exception)]
+    okidx = {id(j): n for n, j in enumerate(j for j, b in zip(jobs, built) if not isinstance(b, Exception))}
+    RESULTS.clear()
     it = iter(ask_many(ok, args.jobs) if ok else [])
     res = [b if isinstance(b, Exception) else next(it) for b in built]
     for j, r in zip(jobs, res):
         out = {"id": j.get("id")}
         out.update({"error": getattr(r, "diag_line", None) or str(r) or type(r).__name__}
                    if isinstance(r, Exception) else {"text": r})
+        info = RESULTS.get(okidx.get(id(j)))
+        if info:
+            out.update(requested_model=info["requested"], actual_model=info["actual"], fallback=info["fallback"])
         print(json.dumps(out, ensure_ascii=False), flush=True)
 
 
@@ -1065,6 +1092,29 @@ def ci_check(root, branch, base, title, body, message, timeout):
     return False, f"CI did not finish within {timeout}s"
 
 
+def round_path(args, rnd, suffix):
+    """Where round N's raw model answer / ap repair briefing is kept: next to the task file
+    (<task>.round<N>.ap), else (no task file, or it lives inside the repo) ~/.offload-browser/rounds/<utc>-<pid>/."""
+    root = os.path.abspath(args.dir) + os.sep
+    if args.task_file and not os.path.abspath(args.task_file).startswith(root):  # in the repo `--ci` would commit it
+        return f"{args.task_file}.round{rnd}.{suffix}"
+    d = os.path.join(HOME, "rounds", RUN_ID)
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"round{rnd}.{suffix}")
+
+
+RUN_ID = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+
+
+def keep(path, text):
+    try:
+        open(path, "w", encoding="utf-8").write(text)
+        return path
+    except OSError as e:
+        log(f"cannot save {path}: {e}")
+        return None
+
+
 def cmd_code(args):
     set_stall(args)
     root = os.path.abspath(args.dir)
@@ -1096,7 +1146,12 @@ def cmd_code(args):
         ans = ask_many([(prompt, args.model, None)])[0]
         if isinstance(ans, Exception):
             fail_exit(ans)
+        raw_file = keep(round_path(args, rnd, "ap"), ans)
+        if raw_file:
+            log(f"round {rnd}: raw model answer saved to {raw_file}")
         patch = extract_patch(ans)
+        if getattr(args, "dry_run", False):
+            sys.exit(code_dry_run(args, root, rnd, ans, patch, dctx))
         if looks_like_diff(patch):
             log(f"round {rnd}: the model answered with a unified diff, which is forbidden")
             last_reason, last_detail = "PATCH_FAILED", "the model answered with a unified diff"
@@ -1105,6 +1160,7 @@ def cmd_code(args):
                        "format from the spec above, inside one ```ap block.")
             continue
         pfile = os.path.join(root, ".afix.ap")
+        get_runs().note(f"round {rnd}: applying the ap patch")
         # the patcher refuses to run while a stale afailed.ap is around
         for stale in ("afailed.ap", "afailed.md"):
             if os.path.exists(os.path.join(root, stale)):
@@ -1121,6 +1177,9 @@ def cmd_code(args):
             last_reason, last_detail = "PATCH_FAILED", err
             brief = os.path.join(root, "afailed.md")
             if os.path.exists(brief):
+                kept = keep(round_path(args, rnd, "afailed.md"), open(brief, encoding="utf-8").read())
+                if kept:
+                    log(f"round {rnd}: ap repair briefing saved to {kept}")
                 history = ("\nYOUR PREVIOUS PATCH WAS ONLY PARTLY APPLIED by the ap patcher (the codebase "
                            "above already contains the modifications that applied). Its repair briefing:\n"
                            + open(brief, encoding="utf-8").read()[:30000]
@@ -1136,6 +1195,7 @@ def cmd_code(args):
         os.remove(pfile)
         log(f"round {rnd}: patch applied")
         if args.ci:
+            get_runs().note(f"round {rnd}: waiting for CI")
             ok, out = ci_check(root, branch, args.ci_base, title, args.ci_body or
                                f"Draft opened by `{PROG} code --ci`; CI is the test runner.",
                                f"{title} (round {rnd})", args.test_timeout)
@@ -1151,6 +1211,7 @@ def cmd_code(args):
         if not args.test:
             print(ans)
             return
+        get_runs().note(f"round {rnd}: running tests: {args.test[:80]}")
         t = subprocess.run(args.test, shell=True, cwd=root, capture_output=True, text=True,
                            timeout=args.test_timeout)
         if t.returncode == 0:
@@ -1168,9 +1229,29 @@ def cmd_code(args):
 
 
 
+def code_dry_run(args, root, rnd, ans, patch, dctx):
+    """--dry-run: the model's ap patch is received, saved and checked with `ap --dry-run`; nothing is applied."""
+    if looks_like_diff(patch):
+        e = RuntimeError("dry-run: the model answered with a unified diff (forbidden, ap only)")
+        fail_exit(attach_diag(e, dctx, reason="PATCH_FAILED", detail=str(e)))
+    pf = keep(round_path(args, rnd, "patch.ap"), patch)
+    before = {f for f in ("afailed.ap", "afailed.md") if os.path.exists(os.path.join(root, f))}
+    ap = subprocess.run([sys.executable, AP_PY, pf, "--dir", root, "--dry-run"], capture_output=True, text=True)
+    for f in ("afailed.ap", "afailed.md"):
+        if f not in before and os.path.exists(os.path.join(root, f)):
+            os.remove(os.path.join(root, f))
+    out = (ap.stdout + ap.stderr)[-3000:]
+    log(f"round {rnd}: dry-run of the patch ({pf}): {'OK' if ap.returncode == 0 else 'FAILED'}\n{out}")
+    if ap.returncode != 0:
+        e = RuntimeError(f"dry-run: the ap patch does not apply cleanly: {_oneline(out, 200)}")
+        fail_exit(attach_diag(e, dctx, reason="PATCH_FAILED", detail=out))
+    print(ans)
+    return 0
+
+
 # ---------------------------------------------------------------- router gate
 
-ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag", "watch")
+ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve", "diag", "watch", "whoami")
 ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py", "mistral-chat", "mistral_chat.py",
                    "deepseek-chat", "deepseek_chat.py")
 
@@ -1360,13 +1441,90 @@ def cmd_guard(args):
     sys.exit(0)
 
 
+JS_ACCOUNT = r"""(()=>{const re=/[\w.+-]+@[\w-]+(\.[\w-]+)+/; let any='';
+  for (const e of document.querySelectorAll('[aria-label],[title]')) {
+    const t=(e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||''); const m=t.match(re);
+    if (m) { if (/account/i.test(t)) return m[0]; any=any||m[0]; } }
+  return any;})()"""
+def account_file():
+    return os.path.join(HOME, f"account-{VENDOR}.txt")
+
+
+def fetch_account(ch, timeout=30):
+    """Email of the Google account the profile is signed in with, read from the AI Studio page
+    (the account button's label). Returns '' when signed out. Cookies/tokens are never read."""
+    tab = ch.new_tab(f"{BASE}/prompts/new_chat")
+    try:
+        tab.wait_js(f"!!{JS_BOX} || location.host.startsWith('accounts.')", timeout=timeout)
+        if "accounts." in (tab.url() or ""):
+            return ""
+        try:
+            return tab.wait_js(JS_ACCOUNT, timeout=15) or ""
+        except TimeoutError:
+            return ""
+    finally:
+        tab.close()
+
+
+def cached_account():
+    try:
+        email, ts = open(account_file()).read().split()[:2]
+        return email, int(time.time() - float(ts))
+    except (OSError, ValueError):
+        return "", None
+
+
+def cmd_whoami(args):
+    if not is_gemini():
+        sys.exit(f"{PROG} whoami: only the AI Studio engine can read the account from the page")
+    ch = open_chrome()
+    owned = ch.proc is not None
+    try:
+        email = fetch_account(ch)
+    finally:
+        if owned:
+            ch.quit()
+    if not email:
+        sys.exit(f"not signed in (or the account button was not found): run `{PROG} login`")
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        fd = os.open(account_file(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(f"{email} {time.time():.0f}\n")
+    except OSError:
+        pass
+    print(email)
+
+
+def chrome_state():
+    try:
+        port = int(open(PORT_FILE).read().strip() or 0)
+    except (OSError, ValueError):
+        return "not running"
+    return f"running (debug port {port})" if _port_open(port) else f"stale port file (port {port} closed)"
+
+
 def cmd_diag(args):
-    """Print the summary.txt of the last N failure bundles."""
+    """Account, default model, Chrome state, then the summary.txt of the last N failure bundles."""
+    email, age = cached_account()
+    state = chrome_state()
+    if state.startswith("running") and is_gemini():  # refresh from the page, never start Chrome just for this
+        try:
+            ch = open_chrome()
+            email = fetch_account(ch, timeout=20) or email
+            age = 0 if email else age
+        except Exception as e:
+            log(f"diag: cannot read the account from the page: {e}")
+    print(f"account: {email or 'unknown (run `' + PROG + ' whoami`)'}"
+          + (f" (read {age}s ago)" if email and age else ""))
+    print(f"default_model: {DEFAULT_MODEL}  fallback: {'off' if NO_FALLBACK else 'on'}")
+    ok = bool(logged_in(json.load(open(COOKIES)) if os.path.exists(COOKIES) else []))
+    print(f"chrome: {state}  logged_in(cookies): {ok}  home: {HOME}")
     base = os.path.join(HOME, "diag")
     dirs = sorted(d for d in (os.listdir(base) if os.path.isdir(base) else [])
                   if os.path.isfile(os.path.join(base, d, "summary.txt")))
     if not dirs:
-        print(f"no diagnostics in {base}")
+        print(f"no failure bundles in {base}")
         return
     for d in dirs[-max(1, args.n):]:
         print(f"== {os.path.join(base, d)}")
@@ -1448,6 +1606,8 @@ def main():
     s.add_argument("-o", "--out"); s.add_argument("--max-context", type=int, help="max chars of packed context "
                    "(default $OFFLOAD_MAX_CONTEXT or 400000)")
     watch_opts(s); s.set_defaults(fn=cmd_ask)
+    s = sub.add_parser("whoami", help="email of the AI Studio account the profile is signed in with")
+    s.set_defaults(fn=cmd_whoami)
     s = sub.add_parser("serve", help="keep a warm Chrome running"); s.set_defaults(fn=cmd_serve)
     s = sub.add_parser("stop", help="stop the warm Chrome"); s.set_defaults(fn=cmd_stop)
     s = sub.add_parser("batch"); s.add_argument("file"); s.add_argument("-j", "--jobs", type=int, default=3)
@@ -1466,6 +1626,8 @@ def main():
     s.add_argument("--ci-body", help="draft PR description")
     s.add_argument("--test-timeout", type=int, default=1800)
     s.add_argument("-r", "--rounds", type=int, default=3)
+    s.add_argument("--dry-run", action="store_true",
+                   help="get the model's ap patch, save and validate it with `ap --dry-run`; apply nothing")
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_code)
     s = sub.add_parser("guard", help="PreToolUse hook that gates router models (--manager: orchestrator gate)")
     s.add_argument("--manager", action="store_true", help="gate for a manager that must offload all work")

@@ -24,6 +24,7 @@ permission:
     "aistudio status": allow
     "aistudio status --runs": allow
     "aistudio watch*": allow
+    "aistudio whoami": allow
     "OFFLOAD_CALLER=* aistudio ask *": allow
     "OFFLOAD_CALLER=* aistudio code *": allow
     "OFFLOAD_CALLER=* aistudio batch *": allow

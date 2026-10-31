@@ -56,8 +56,9 @@ def retry_pause(err, attempt):
 
 
 class Attempt:
-    def __init__(self, model, attempt, job, now):
+    def __init__(self, model, attempt, job, now, requested=None):
         self.model, self.attempt, self.job = model, attempt, job
+        self.requested = requested or model
         self.t0 = self.last_progress = self.last_hb = now
         self.phase, self.state = "starting", "preparing"
         self.chars, self.hb_chars, self.last_growth = None, 0, None
@@ -66,6 +67,8 @@ class Attempt:
 
     def as_dict(self, now):
         return {"job": self.job, "model": self.model, "attempt": self.attempt,
+                "requested_model": self.requested,
+                "actual_model": self.model if self.end_state == "done" else None,
                 "state": self.end_state or self.state, "phase": self.phase,
                 "answer_chars": self.chars, "elapsed": int(now - self.t0),
                 "last_progress_ts": round(self.last_progress, 1), "error": self.error}
@@ -92,15 +95,22 @@ class Runs:
         self.path = os.path.join(home, f"run-{self.pid}.json")
         self.atts, self.lock = [], threading.Lock()
         self.stop_ev, self.thread, self.started = threading.Event(), None, clock()
-        self.closed = False
+        self.closed, self.note_text, self.between_hb = False, "", clock()
 
     # --- engine side
-    def begin(self, model, attempt, job=0):
-        att = Attempt(model, attempt, job, self.clock())
+    def begin(self, model, attempt, job=0, requested=None):
+        att = Attempt(model, attempt, job, self.clock(), requested)
         with self.lock:
             self.atts.append(att)
+            self.note_text = ""
         self.write()
         return att
+
+    def note(self, text):
+        """What the process does while no request is in flight (retry pause, patch, tests...);
+        shown in the heartbeat and the status file."""
+        self.note_text, self.between_hb = text, self.clock()
+        self.write()
 
     def phase(self, name, att=None):
         att = att or current()
@@ -125,7 +135,7 @@ class Runs:
     def end(self, att, state, error=""):
         if att:
             att.end_state, att.error = state, str(error or "")[:300]
-            att.last_progress = self.clock()
+            att.last_progress = self.between_hb = self.clock()
         self.write()
 
     # --- ticker
@@ -145,6 +155,9 @@ class Runs:
             if now - a.last_hb >= self.hb:
                 self.log(self.heartbeat_line(a, now))
                 a.last_hb, a.hb_chars = now, a.chars or 0
+        if not live and not self.closed and now - self.between_hb >= self.hb:
+            self.log(f"waiting: state=between, phase={self.note_text or 'local work'}")
+            self.between_hb = now
         self.write()
 
     def snapshot(self):
@@ -164,6 +177,7 @@ class Runs:
         d["active"] = not self.closed
         if not live and not self.closed and atts:
             d["state"] = "between"  # no request in flight: retry pause, patch, tests
+            d["phase"] = self.note_text or "local work"
         return d
 
     def write(self):
