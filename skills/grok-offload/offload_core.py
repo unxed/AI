@@ -317,15 +317,30 @@ def ask_tab(ch, prompt, model=DEFAULT_MODEL, system=None, timeout=900):
         tab.c.eval(JS_HOOK)
         # Real browser input (CDP Input.*) instead of JS-set values and el.click(): the page
         # gets the same trusted events a user's paste and click produce.
-        tab.c.eval(f"{JS_BOX}.focus()")
-        tab.insert_text(prompt)
+        # (multi-line Input.insertText is slow - ~1 min per 100k chars - so a long prompt
+        # is set via JS and only its tail is typed for real)
+        head, tail = (prompt[:-200], prompt[-200:]) if len(prompt) > 4000 else ("", prompt)
+        if head:
+            tab.c.eval(_fill_js(JS_BOX, head), timeout=120)
+        tab.c.eval(f"(()=>{{const e={JS_BOX}; e.focus(); e.setSelectionRange(e.value.length, e.value.length);}})()")
+        tab.c.call("Input.insertText", text=tail, timeout=120)
         if tab.c.eval(f"{JS_BOX}.value.length") < len(prompt.strip()) // 2:
             tab.c.eval(_fill_js(JS_BOX, prompt), timeout=120)  # fallback
         tab.wait_js(f"{JS_RUN} && !{JS_RUN}.disabled", timeout=60)
         started = False
         for _ in range(3):  # a dialog may swallow the first click
             tab.c.eval(JS_CLOSE_DIALOGS)
-            tab.click(*tab.c.eval(center_js(JS_RUN)))
+            # the informational cookie bar ("... uses cookies", only a Hide button) covers Run
+            tab.c.eval("""(()=>{const b=document.querySelector('.glue-cookie-notification-bar');
+                const h=b && [...b.querySelectorAll('button,a')].find(e=>/^(hide|ok|got it)$/i
+                .test((e.innerText||'').trim())); if (h) h.click();})()""")
+            tab.c.eval(f"{JS_RUN}.scrollIntoView({{block:'center'}})")
+            x, y = tab.c.eval(center_js(JS_RUN))
+            if tab.c.eval(f"{JS_RUN}.contains(document.elementFromPoint({x},{y}))"):
+                tab.click(x, y)
+            else:
+                log("Run button is covered by an overlay; clicking it from JS")
+                tab.c.eval(f"{JS_RUN}.click()")
             try:
                 tab.wait_js("window.__ofl && window.__ofl.n > 0", timeout=20)
                 started = True
