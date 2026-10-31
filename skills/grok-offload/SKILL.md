@@ -5,9 +5,11 @@ description: Offload thinking and code writing to Grok inside X (x.com/i/grok ch
 
 # Grok (X) offload
 
-Twin of [aistudio-offload](../aistudio-offload/SKILL.md): identical commands, flags and
-router rules — only the worker differs. Read that SKILL.md; replace `aistudio` with `grok`.
-Requires the `aistudio-offload` folder next to this one.
+Same design as the aistudio-offload skill, but a separate, self-contained skill:
+this folder carries its own copy of the engine (`offload_core.py`, `cdp.py`, `vendor/ap`).
+
+Roles: a cheap **router** model only runs `grok` commands (hard-gated, see below);
+**Grok** does all thinking and writing. Never solve the task yourself.
 
 ```bash
 ./install.sh                     # once; creates ~/.local/bin/grok
@@ -24,4 +26,15 @@ Notes:
   into text (`=== BEGIN path ===` blocks).
 - The answer is read from X's chat WebSocket (`CHANNEL_ASSISTANT_RESPONSE` chunks), so it
   is raw markdown with code fences intact; thinking chunks are skipped.
-- Router gate: the same `aistudio guard` hook also allows single `grok ...` commands.
+- `grok code` sends tracked repo files + the [`ap`](https://github.com/unxed/ap) patch spec;
+  Grok's patch is applied and the `-t` test command run; failures go back for `-r 4` rounds.
+- If X says "we temporarily restricted login" in `grok login`, use the page's
+  "Paste cookies" box: `auth_token=...; ct0=...` from DevTools of a browser where you are
+  logged in to X.
+
+## Router with a hard gate
+
+`agents/claude/grok-router.md` (Claude Code: `tools: Bash` + `PreToolUse` hook `grok guard`,
+install to `~/.claude/agents/`) and `agents/opencode/grok-router.md` (opencode: bash allowed
+only for `grok …`). The gate blocks anything except a single `grok ask|code|batch|status|serve`
+command — no chaining, redirects, substitutions or file writes.

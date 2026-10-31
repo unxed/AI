@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
-# grok-offload reuses the aistudio-offload engine (venv + Google Chrome, no Playwright).
+# Install grok-offload: a tiny Python venv (websockets) + Google Chrome. No Playwright
+# (X/Google detect automation frameworks); a real Chrome is driven over raw CDP.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ENGINE="${AISTUDIO_DIR:-$HERE/../aistudio-offload}"
-VENV="$HOME/.aistudio/venv"
-[ -x "$VENV/bin/python" ] || "$ENGINE/install.sh"
+VENV="${GROK_HOME:-$HOME/.grok-offload}/venv"
+
+if ! python3 -c 'import ensurepip' 2>/dev/null; then
+  sudo apt-get update -qq && sudo apt-get install -y -qq python3-venv
+fi
+python3 -m venv "$VENV"
+"$VENV/bin/pip" install -q --upgrade pip websockets
+
+if [ -z "${AISTUDIO_CHROME:-}" ] && ! command -v google-chrome >/dev/null && ! command -v chromium >/dev/null; then
+  if sudo -n true 2>/dev/null && command -v apt-get >/dev/null; then
+    tmp=$(mktemp -d)
+    curl -fsSL -o "$tmp/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    sudo apt-get install -y -qq "$tmp/chrome.deb"
+    rm -rf "$tmp"
+  else
+    echo "Please install Google Chrome (or set AISTUDIO_CHROME=/path/to/chrome)." >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/grok" <<EOW
 #!/bin/sh

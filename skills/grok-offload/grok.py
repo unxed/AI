@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """grok - offload LLM work to Grok inside X (x.com/i/grok) via a headless real Chrome.
 
-Same commands as `aistudio` (login, ask, code, batch, serve, status, guard...), but the
-worker is Grok on X. Reuses the aistudio-offload engine (raw CDP, no Playwright).
-Requires the sibling skill folder ../aistudio-offload (or AISTUDIO_DIR).
+Same command set as the aistudio-offload skill (login, ask, code, batch, serve, status,
+guard...), but the worker is Grok on X. Self-contained: offload_core.py and cdp.py are an
+identical copy of the shared engine (raw CDP to a real Chrome, no Playwright).
 
   grok login                 # sign in to X once (web remote view, works over ssh -L)
   grok ask "question"        # -m fast|auto|expert
@@ -16,10 +16,9 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ENGINE = os.environ.get("AISTUDIO_DIR", os.path.join(HERE, "..", "aistudio-offload"))
-os.environ.setdefault("AISTUDIO_HOME", os.path.expanduser("~/.grok-offload"))
-sys.path.insert(0, ENGINE)
-import aistudio as eng  # noqa: E402
+os.environ.setdefault("AISTUDIO_HOME", os.path.expanduser(os.environ.get("GROK_HOME", "~/.grok-offload")))
+sys.path.insert(0, HERE)
+import offload_core as eng  # noqa: E402
 
 GROK_URL = "https://x.com/i/grok"
 INLINE_LIMIT = 50_000   # longer prompts go in as an attached .txt (the box caps near 58k)

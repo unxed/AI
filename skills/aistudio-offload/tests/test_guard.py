@@ -1,6 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from aistudio import check_router_command as chk, extract_patch
+from offload_core import check_router_command as chk, extract_patch
 
 OK = ['aistudio ask "explain foo"', "aistudio code --task-file /tmp/t.md -t 'go test ./...'",
       "aistudio code - < task.md", "AISTUDIO_MODEL=gemini-2.5-pro aistudio ask hi",
