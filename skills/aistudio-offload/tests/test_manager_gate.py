@@ -76,3 +76,13 @@ def test_relative_redirect_resolved_against_cwd_and_cd():
     assert oc.check_manager_command("gh pr view 1 > pr.txt", cwd="/home/u/repo") is not None
     assert oc.check_manager_command(f"cd {w} && echo a > ../../../../home/u/f") is not None
     assert oc.check_manager_tool("Bash", {"command": "echo a > d.md"}, cwd=w) is None
+
+
+def test_relative_tee_resolved_against_cd():
+    import offload_core as oc
+    assert oc.check_manager_command("cd /tmp/x/work/y && echo a | tee out.txt") is None
+    assert oc.check_manager_command("cd /tmp/x/work/y && echo a | tee -a notes.md") is None
+    assert oc.check_manager_command("echo a | tee out.txt", cwd="/tmp/x/work/y") is None
+    assert oc.check_manager_command("echo a | tee out.txt", cwd="/home/u/repo") is not None
+    assert oc.check_manager_command("cd /tmp/x/work/y && echo a | tee ../../../../home/u/f") is not None
+    assert oc.check_manager_command("echo a | tee out.txt") is not None

@@ -1583,7 +1583,7 @@ def _manager_tokens(cmd):
     return list(lx)
 
 
-def _check_manager_segment(argv):
+def _check_manager_segment(argv, cwd=None):
     """argv of one simple command (redirects already removed) -> reason or None."""
     while argv and ("=" in argv[0] and argv[0].split("=")[0].replace("_", "a").isalnum()
                     or os.path.basename(argv[0]) in ("sudo", "env", "time", "nohup", "command", "exec")):
@@ -1597,7 +1597,7 @@ def _check_manager_segment(argv):
     if name in _INTERPRETERS and "-c" in args[:3]:
         i = args.index("-c")
         if i + 1 < len(args):
-            return check_manager_command(args[i + 1]) or None
+            return check_manager_command(args[i + 1], cwd) or None
         return None
     if re.fullmatch(r"python[\d.]*|pypy3?", name):
         for a in args:
@@ -1618,7 +1618,7 @@ def _check_manager_segment(argv):
         return "`perl -i/-e` is not allowed"
     if name in ("awk", "gawk", "mawk") and any(re.search(r"print[^;}]*>|system\s*\(", a) for a in args):
         return "awk writing to files / running commands is not allowed"
-    if name == "tee" and any(not a.startswith("-") and not _tmp_ok(a) for a in args):
+    if name == "tee" and any(not a.startswith("-") and not _tmp_ok(_abs_target(a, cwd)) for a in args):
         return "`tee` writes files"
     if name in ("patch", "ap", "ap.py"):
         return "patches must be applied inside `code` (the router applies them), not by the manager"
@@ -1657,7 +1657,7 @@ def check_manager_command(cmd, cwd=None):
     while i <= len(toks):
         t = toks[i] if i < len(toks) else None
         if t is None or (t and set(t) <= _SEPS):
-            why = _check_manager_segment(seg)
+            why = _check_manager_segment(seg, cwd)
             if why:
                 return why
             if len(seg) == 2 and seg[0] == "cd":
