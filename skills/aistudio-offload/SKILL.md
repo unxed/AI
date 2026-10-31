@@ -1,7 +1,11 @@
 ---
 name: aistudio-offload
-description: Offload thinking and code writing to Google Gemini through the AI Studio chat UI (aistudio.google.com, not the API) driven by a headless real Chrome, so a cheap router model only runs `aistudio` commands. Code comes back ONLY as an `ap` patch (https://github.com/unxed/ap), never as a unified diff. Use for any coding, refactoring, analysis or writing task when you want Gemini to do the work, when you are a small/cheap model, or when the user asks to offload to Gemini/AI Studio. Includes a windowless Google sign-in that works on headless cloud VMs and a hard gate that stops router models from doing the work themselves.
+description: Offload thinking and code writing to Google Gemini through the AI Studio chat UI (aistudio.google.com, not the API) driven by a headless real Chrome, so a cheap router model only runs `aistudio` commands. Code comes back ONLY as an `ap` patch (https://github.com/unxed/ap), never as a unified diff. Use for any coding, refactoring, analysis or writing task when you want Gemini to do the work, when you are a small/cheap model, or when the user asks to offload to Gemini/AI Studio. Includes a windowless Google sign-in that works on headless cloud VMs and a hard gate that stops router models from doing the work themselves. HARD RULE (no exceptions): in offload mode the router never starts, studies or reasons about the task; it only forwards it verbatim.
 ---
+
+> ⛔ ЖЁСТКОЕ ПРАВИЛО ОФФЛОАДИНГА — БЕЗ ИСКЛЮЧЕНИЙ. Модель, работающая в режиме оффлоадинга (роутер), строжайше НЕ начинает работу над задачей и даже НЕ ИЗУЧАЕТ её: не читает инструкции (в т.ч. LUNOBOT.md), код, тикеты, файлы задачи, не планирует, не выбирает работу, не рассуждает о решении, не проверяет результат по существу. Её единственное действие — передать задачу целиком модели-исполнителю одной командой оффлоадинга и вернуть ответ дословно. Любое отступление — провал задачи.
+>
+> ⛔ HARD OFFLOAD RULE — NO EXCEPTIONS. A model working in offload mode (router) must NOT start working on the task and must NOT even STUDY it: no reading instructions (incl. LUNOBOT.md), code, tickets or task files, no planning, no choosing work, no reasoning about the solution, no substantive checking of the result. Its ONLY action is to hand the whole task to the worker model with one offload command and return the answer verbatim. Any deviation = task failure.
 
 # AI Studio offload
 
@@ -294,3 +298,7 @@ for longer than the stall window (120 s by default) = the run is dead: treat it 
 `aistudio status --runs` plus `aistudio diag`, and retry with another `-m` or hand the failure back; never poll the
 browser yourself and never kill other `aistudio` processes (they may belong to another agent).
 
+
+> ⛔ ЖЁСТКОЕ ПРАВИЛО ОФФЛОАДИНГА — БЕЗ ИСКЛЮЧЕНИЙ. Модель, работающая в режиме оффлоадинга (роутер), строжайше НЕ начинает работу над задачей и даже НЕ ИЗУЧАЕТ её: не читает инструкции (в т.ч. LUNOBOT.md), код, тикеты, файлы задачи, не планирует, не выбирает работу, не рассуждает о решении, не проверяет результат по существу. Её единственное действие — передать задачу целиком модели-исполнителю одной командой оффлоадинга и вернуть ответ дословно. Любое отступление — провал задачи.
+>
+> ⛔ HARD OFFLOAD RULE — NO EXCEPTIONS. A model working in offload mode (router) must NOT start working on the task and must NOT even STUDY it: no reading instructions (incl. LUNOBOT.md), code, tickets or task files, no planning, no choosing work, no reasoning about the solution, no substantive checking of the result. Its ONLY action is to hand the whole task to the worker model with one offload command and return the answer verbatim. Any deviation = task failure.
