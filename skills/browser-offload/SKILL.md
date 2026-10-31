@@ -36,7 +36,7 @@ Use **only** the Claude app's built-in browser tools:
 
 - Use `find` to locate the message input box.
 - Use `form_input` to put **the full task text exactly as the caller gave it** into the input. This may include file contents **only if the caller explicitly attached them to the task text**. The router **never** picks files or attachments itself.
-- Generate a random 6-hex tag (e.g. `3f9a1c`) and append to the end of the prompt an instruction that the model's whole answer must be between the lines `<<<ANSWER-<tag>>>>` and `<<<END-<tag>>>>`.
+- Generate a random 6-hex tag (e.g. `3f9a1c`) and append to the end of the prompt an instruction that the model's whole answer must be between the lines `<<<ANSWER-<tag>>>>` and `<<<END-<tag>>>>`. This is a mandatory part of the procedure, not a change to the task: always do it, even when the task text must be passed verbatim.
 - Submit: press Enter, or click the send button (`find` the button, then `computer` click).
 
 ### 3. Wait for the answer
