@@ -1615,7 +1615,7 @@ def main():
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.set_defaults(fn=cmd_batch)
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
     s.add_argument("task", nargs="?", default="", help="task text or - for stdin"); s.add_argument("--task-file")
-    s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="*")
+    s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="+", action="extend")
     watch_opts(s)
     s.add_argument("--max-context", type=int, help="max chars of packed context (default "
                    "$OFFLOAD_MAX_CONTEXT or 400000); over the limit -> exit 3, nothing is truncated")

@@ -163,3 +163,17 @@ def test_stall_decision():
 def test_stalled_classified():
     assert oc.classify_failure(oc.StallError("STALLED: no output growth for 181s")) == "STALLED"
     assert "STALLED" in oc.REASONS
+
+
+def test_repeated_p_flags_accumulate(monkeypatch):
+    # `-p a -p b` must keep both (it used to keep only the last one, so Gemini never saw
+    # the file it had to patch -> ap "Snippet not found")
+    import offload_core as oc
+    seen = {}
+    monkeypatch.setattr(oc, "cmd_code", lambda args: seen.setdefault("ns", args))
+    monkeypatch.setattr(oc.sys, "argv", ["aistudio", "code", "t", "-p", "a.md", "-p", "b.py", "c.md"])
+    try:
+        oc.main()
+    except SystemExit:
+        pass
+    assert seen["ns"].paths == ["a.md", "b.py", "c.md"]
