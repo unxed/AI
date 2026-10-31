@@ -11,12 +11,12 @@ Separate, self-contained skill (own copy of the engine: `offload_core.py`, `cdp.
 
 ## Terminology / Термины
 
-- **браузер скилла deepseek-chat** (*the deepseek-chat skill browser*) — headless Chrome, который
+- **браузер оффлоадинга** (*the offload browser*, один на все `*-offload` скиллы) — headless Chrome, который
   поднимает команда `deepseek-chat` и через который идёт вся работа с DeepSeek. Профиль:
   `~/.offload-browser/profile` (общий с остальными `*-offload` скиллами).
 - Это не встроенный браузер Claude desktop app и не Chrome пользователя.
 - Не называть его «CLI» или «CLI-профилем»: `deepseek-chat` — это команда, а DeepSeek всегда работает
-  через браузер скилла. Пример: «браузер скилла deepseek-chat не залогинен», а не «CLI не залогинен».
+  через браузер оффлоадинга. Пример: «браузер оффлоадинга не залогинен», а не «CLI не залогинен».
 - Отчёты роутеров используют этот термин.
 
 ```bash

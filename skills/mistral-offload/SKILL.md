@@ -11,12 +11,12 @@ Separate, self-contained skill (own copy of the engine: `offload_core.py`, `cdp.
 
 ## Terminology / Термины
 
-- **браузер скилла mistral-chat** (*the mistral-chat skill browser*) — headless Chrome, который
+- **браузер оффлоадинга** (*the offload browser*, один на все `*-offload` скиллы) — headless Chrome, который
   поднимает команда `mistral-chat` и через который идёт вся работа с Le Chat. Профиль:
   `~/.offload-browser/profile` (общий с остальными `*-offload` скиллами).
 - Это не встроенный браузер Claude desktop app и не Chrome пользователя.
 - Не называть его «CLI» или «CLI-профилем»: `mistral-chat` — это команда, а Mistral всегда работает
-  через браузер скилла. Пример: «браузер скилла mistral-chat не залогинен», а не «CLI не залогинен».
+  через браузер оффлоадинга. Пример: «браузер оффлоадинга не залогинен», а не «CLI не залогинен».
 - Отчёты роутеров используют этот термин.
 
 ```bash

@@ -13,12 +13,12 @@ Roles: a cheap **router** model only runs `grok` commands (hard-gated, see below
 
 ## Terminology / Термины
 
-- **браузер скилла grok** (*the grok skill browser*) — headless Chrome, который поднимает команда
+- **браузер оффлоадинга** (*the offload browser*, один на все `*-offload` скиллы) — headless Chrome, который поднимает команда
   `grok` и через который идёт вся работа с Grok в X. Профиль: `~/.offload-browser/profile`
   (общий с остальными `*-offload` скиллами).
 - Это не встроенный браузер Claude desktop app и не Chrome пользователя.
 - Не называть его «CLI» или «CLI-профилем»: `grok` — это команда, а Grok всегда работает через
-  браузер скилла. Пример: «браузер скилла grok не залогинен», а не «CLI не залогинен».
+  браузер оффлоадинга. Пример: «браузер оффлоадинга не залогинен», а не «CLI не залогинен».
 - Отчёты роутеров используют этот термин.
 
 ```bash

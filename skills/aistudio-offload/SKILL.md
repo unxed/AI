@@ -16,12 +16,12 @@ The main agent decides *what* to do and *which Gemini model*; the router does th
 
 ## Terminology / Термины
 
-- **браузер скилла aistudio** (*the aistudio skill browser*) — headless Chrome, который поднимает
+- **браузер оффлоадинга** (*the offload browser*, один на все `*-offload` скиллы) — headless Chrome, который поднимает
   команда `aistudio` и через который идёт вся работа с Gemini в AI Studio. Профиль:
   `~/.offload-browser/profile`; свой вход в Google, общий для всех `*-offload` скиллов.
 - Это не встроенный браузер Claude desktop app и не Chrome пользователя.
 - Не называть его «CLI» или «CLI-профилем»: `aistudio` — это команда, а Gemini всегда работает
-  через браузер скилла. Пример: «браузер скилла aistudio не залогинен» (`aistudio status`:
+  через браузер оффлоадинга. Пример: «браузер оффлоадинга не залогинен» (`aistudio status`:
   `logged_in=False`), а не «CLI не залогинен».
 - Отчёты роутеров используют этот термин.
 
