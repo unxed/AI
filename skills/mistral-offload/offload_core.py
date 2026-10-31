@@ -294,7 +294,7 @@ def select_model(tab, model):
         if (!r) return false; (r.querySelector('button')||r).click(); return true;}})()""")
     if not ok:
         tab.key("Escape")
-        raise RuntimeError(f"model {model!r} is not available in the AI Studio chat UI")
+        raise ModelUnavailable(f"model {model!r} is not available in the AI Studio chat UI")
     tab.wait_js(f"(document.querySelector('ms-model-selector [data-test-id=model-name]')||{{}}).innerText==={json.dumps(model)}",
                 timeout=20)
 
@@ -342,6 +342,10 @@ def get_runs():
 
 class StallError(RuntimeError):
     pass
+
+
+class ModelUnavailable(RuntimeError):
+    """The model is not offered in the chat UI: retrying it is pointless, only a fallback helps."""
 
 
 def stall_decision(size, last_size, last_change, now, stall_s):
@@ -764,9 +768,9 @@ def ask_many(jobs, jobs_n=3, retries=2):
             model = choose_model(ch, prompt)
         requested = model
         chain = [model] + ([] if NO_FALLBACK else FALLBACK.get(model, []))
-        denied, trail = {}, []
+        denied, trail, skip = {}, [], 0
         for attempt in range(retries + 1):
-            m = chain[min(attempt, len(chain) - 1)]
+            m = chain[min(attempt - skip, len(chain) - 1)]
             _tls.snap = None
             att = runs.begin(m, attempt + 1, jid, requested)
             genwatch.bind(att)
@@ -783,16 +787,20 @@ def ask_many(jobs, jobs_n=3, retries=2):
             except Exception as e:
                 runs.end(att, "failed", e or type(e).__name__)
                 pause, kind = genwatch.retry_pause(e, attempt + 1)
+                if isinstance(e, ModelUnavailable):  # never retry it; go straight to a fallback
+                    pause, kind = 0, "not in the chat UI"
+                    chain = [x for x in chain if x != m]
+                    skip += 1
                 trail.append(f"{m}: {kind}")
                 if kind == "permission denied":
                     denied[m] = denied.get(m, 0) + 1
-                nxt = chain[min(attempt + 1, len(chain) - 1)]
+                nxt = chain[min(attempt + 1 - skip, len(chain) - 1)] if chain else None
                 if nxt in denied and denied[nxt] < 2:
                     # "Permission denied" is usually transient (seen right after rate limits on
                     # sibling models; the same model answered a minute later): one more try after a pause
                     pause = max(pause, 60)
                 no_model = denied.get(nxt, 0) >= 2  # a model denied twice is not retried again
-                if attempt == retries or "login" in str(e) or no_model:
+                if attempt == retries or "login" in str(e) or no_model or nxt is None:
                     ctx["model_selected"] = m
                     r = attach_diag(e, ctx, getattr(_tls, "snap", None))
                     if no_model and attempt < retries:

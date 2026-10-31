@@ -360,3 +360,18 @@ def test_ticker_thread_emits_heartbeat_while_engine_is_blocked(tmp_path, monkeyp
     oc.RUNS.stop()
     hb = [ln for ln in lines if ln.startswith("waiting: model=some-model")]
     assert len(hb) >= 2 and "state=preparing" in hb[0]
+
+
+def test_model_not_in_ui_is_not_retried(many, monkeypatch):
+    # live VM run: gemini-2.5-flash vanished from the chat UI and was retried for 2.5 minutes
+    sleeps, lines = many
+    calls = script(monkeypatch, [oc.ModelUnavailable("model 'old' is not available in the AI Studio chat UI"), "never"])
+    r = oc.ask_many([("p", "model-without-fallbacks", None)])[0]
+    assert isinstance(r, oc.ModelUnavailable) and calls == ["model-without-fallbacks"] and sleeps == []
+
+
+def test_model_not_in_ui_goes_straight_to_fallback(many, monkeypatch):
+    sleeps, lines = many
+    calls = script(monkeypatch, [oc.ModelUnavailable("not available"), "answer"])
+    assert oc.ask_many([("p", "gemini-3.1-pro-preview", None)])[0] == "answer"
+    assert calls == ["gemini-3.1-pro-preview", "gemini-pro-latest"] and sleeps == [0]
