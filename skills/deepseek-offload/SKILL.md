@@ -111,7 +111,7 @@ Stop criteria (AI Studio engine), each ends the attempt at once with the reason 
 Retries (3 attempts, each next one on the next model of the fallback chain) log
 `<model>: attempt N failed (<kind>): <text>; retrying in Ns with <next model>`. Pauses: Permission denied
 30 s x N, rate limit 20 s x N, quota 5 s (quota is per model), others 5 s x N. A model that answered
-Permission denied is never tried again: if no other model is left the command stops at once. When nothing
+Permission denied gets one more try after >= 60 s (it is usually transient); denied twice, it is not retried. When nothing
 works the exit code is non-zero and the **last stderr line** is `DIAG <REASON> <dir>: <text> [attempts: <model>:
 <kind>; ...]`.
 

@@ -289,12 +289,22 @@ def test_permission_denied_switches_model_and_logs_pause(many, monkeypatch):
     assert any("retrying in 30s with gemini-pro-latest" in ln for ln in lines)
 
 
-def test_permission_denied_never_repeats_the_same_model(many, monkeypatch):
+def test_permission_denied_retries_the_same_model_once_after_a_pause(many, monkeypatch):
+    # live AI Studio: "Permission denied" came and went; the same model answered a minute later
     sleeps, lines = many
-    calls = script(monkeypatch, [RuntimeError("AI Studio error: Permission denied."), "never"])
+    pd = RuntimeError("AI Studio error: Permission denied.")
+    calls = script(monkeypatch, [pd, pd, "never"])
     r = oc.ask_many([("p", "model-without-fallbacks", None)])[0]
-    assert isinstance(r, Exception) and calls == ["model-without-fallbacks"] and sleeps == []
-    assert "Permission denied" in r.diag_line and "attempts: model-without-fallbacks: permission denied" in r.diag_line
+    assert isinstance(r, Exception) and calls == ["model-without-fallbacks"] * 2 and sleeps == [60]
+    assert "Permission denied" in r.diag_line
+    assert "attempts: model-without-fallbacks: permission denied; model-without-fallbacks: permission denied" in r.diag_line
+
+
+def test_permission_denied_then_success(many, monkeypatch):
+    sleeps, lines = many
+    calls = script(monkeypatch, [RuntimeError("AI Studio error: Permission denied."), "ok"])
+    assert oc.ask_many([("p", "model-without-fallbacks", None)])[0] == "ok"
+    assert calls == ["model-without-fallbacks"] * 2 and sleeps == [60]
 
 
 def test_rate_limit_pause_and_final_reason(many, monkeypatch):

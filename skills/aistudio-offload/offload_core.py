@@ -760,7 +760,7 @@ def ask_many(jobs, jobs_n=3, retries=2):
         if model == "auto" and is_gemini():  # Gemini only; Grok has its own auto
             model = choose_model(ch, prompt)
         chain = [model] + FALLBACK.get(model, [])
-        denied, trail = set(), []
+        denied, trail = {}, []
         for attempt in range(retries + 1):
             m = chain[min(attempt, len(chain) - 1)]
             _tls.snap = None
@@ -776,9 +776,13 @@ def ask_many(jobs, jobs_n=3, retries=2):
                 pause, kind = genwatch.retry_pause(e, attempt + 1)
                 trail.append(f"{m}: {kind}")
                 if kind == "permission denied":
-                    denied.add(m)
+                    denied[m] = denied.get(m, 0) + 1
                 nxt = chain[min(attempt + 1, len(chain) - 1)]
-                no_model = nxt in denied  # never repeat a model that answered Permission denied
+                if nxt in denied and denied[nxt] < 2:
+                    # "Permission denied" is usually transient (seen right after rate limits on
+                    # sibling models; the same model answered a minute later): one more try after a pause
+                    pause = max(pause, 60)
+                no_model = denied.get(nxt, 0) >= 2  # a model denied twice is not retried again
                 if attempt == retries or "login" in str(e) or no_model:
                     ctx["model_selected"] = m
                     r = attach_diag(e, ctx, getattr(_tls, "snap", None))
