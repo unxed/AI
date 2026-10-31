@@ -512,7 +512,8 @@ def max_context(arg=None):
 
 
 REASONS = ("STALLED", "QUOTA", "RATE_LIMIT", "PERMISSION_DENIED", "CONTEXT_TOO_LARGE", "NOT_LOGGED_IN", "SAFETY",
-           "EMPTY_ANSWER", "TIMEOUT", "UI_CHANGED", "PATCH_FAILED", "TESTS_FAILED", "UNKNOWN")
+           "EMPTY_ANSWER", "TIMEOUT", "UI_CHANGED", "PATCH_FAILED", "PATCH_NOOP", "MALFORMED_RESPONSE", "TESTS_FAILED",
+           "UNKNOWN")
 _CLASSIFY = (
     ("NOT_LOGGED_IN", r"session expired|log ?in again|sign in to continue|accounts\.google\.com|not logged"),
     ("STALLED", r"stalled: no output growth"),
@@ -523,6 +524,7 @@ _CLASSIFY = (
     ("QUOTA", r"quota|resource_exhausted|exhausted|usage limit|daily limit|limit reached|out of (credits|messages)"),
     ("SAFETY", r"safety|blocked|prohibited|policy|moderation|harmful|recitation"),
     ("EMPTY_ANSWER", r"empty answer"),
+    ("MALFORMED_RESPONSE", r"malformed stream"),
 )
 
 
@@ -685,18 +687,70 @@ def _fill_js(el, text):
         e.dispatchEvent(new Event('change',{{bubbles:true}})); return e.value.length;}})()"""
 
 
+def _close_json(frag):
+    """Close the brackets/string a truncated JSON fragment leaves open (tolerant repair)."""
+    stack, in_str, esc = [], False, False
+    for ch in frag:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            stack.append("]" if ch == "[" else "}")
+        elif ch in "]}" and stack:
+            stack.pop()
+    return frag + ('"' if in_str else "") + "".join(reversed(stack))
+
+
+_STREAM_ERR_RE = r'\[\s*(\d{1,3})\s*,\s*"((?:[^"\\]|\\.){3,300})"\s*\]'
+
+
+def _load_stream(raw):
+    """(data, broken): the JSON of a GenerateContent body. Tolerates an anti-XSSI prefix and
+    trailing garbage. A stream cut or poisoned mid-way (e.g. an error chunk like
+    [,[7,"..."]] appended after the text: json.loads said "Expecting ',' delimiter") is
+    repaired to its longest valid prefix and `broken` says what broke it."""
+    import re
+    raw = raw[raw.find("["):] if "[" in raw else raw
+    try:
+        data, _ = json.JSONDecoder().raw_decode(raw)
+        return data, ""
+    except json.JSONDecodeError as e:
+        pos = e.pos
+    m = re.search(_STREAM_ERR_RE, raw[max(0, pos - 5):])
+    broken = m.group(2) if m else f"stream cut at char {pos}"
+    head = raw[:pos].rstrip().rstrip(",")
+    for cut in (head, head[:head.rfind(",")] if "," in head else head):
+        try:
+            return json.loads(_close_json(cut)), broken
+        except json.JSONDecodeError:
+            continue
+    return None, broken
+
+
 def parse_generate(raw):
     """Extract the visible answer text from a GenerateContent stream body.
 
     The body is a JSON array of chunks (protobuf-as-JSON). A text part looks like
     [null, "text", ...] and thought parts carry a 1 at index 12. We walk all
-    chunks and concatenate non-thought text parts in order."""
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        # streamed bodies may be ")]}'"-prefixed or truncated
-        raw = raw[raw.find("["):]
-        data = json.loads(raw)
+    chunks and concatenate non-thought text parts in order. A body that is not valid JSON
+    (truncated stream, error chunk after the text) is never returned as a partial answer:
+    it raises RuntimeError("AI Studio error: ...") when the stream carries an error message
+    (classified and retried / falls back like any UI error), else "Malformed stream"
+    (MALFORMED_RESPONSE, retried)."""
+    data, broken = _load_stream(raw)
+    if broken:
+        if not broken.startswith("stream cut"):
+            pre = "Permission denied. " if "permission" in broken.lower() else ""
+            raise RuntimeError(f"AI Studio error: {pre}{broken} (error chunk in the response stream, "
+                               f"{len(raw)} chars received)")
+        raise RuntimeError(f"Malformed stream from the model: {broken} ({len(raw)} chars received, "
+                           f"the answer is truncated)")
     out = []
 
     def is_part(x):
@@ -717,7 +771,21 @@ def parse_generate(raw):
     return "".join(out)
 
 
-def build_prompt(text, files, limit=None):
+LINENO_NOTE = ("Each file line below is prefixed with its 1-based line number and a '|' (e.g. '  42| code'). "
+               "The prefix is NOT part of the file. Cite locations as path:LINE using these numbers; "
+               "never guess a line number that you cannot see.")
+
+
+def number_lines(body):
+    """'  42| code' per line (width from the line count), for exact path:line citations."""
+    lines = body.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    w = max(4, len(str(len(lines))))
+    return "\n".join(f"{i:>{w}}| {l}" for i, l in enumerate(lines, 1))
+
+
+def build_prompt(text, files, limit=None, line_numbers=False):
     """Inline `files` before the task. Raises ContextTooLarge (never truncates) when the
     result would exceed `limit` chars (default: max_context())."""
     limit = limit or max_context()
@@ -725,7 +793,11 @@ def build_prompt(text, files, limit=None):
     for f in files or []:
         body = open(f, encoding="utf-8", errors="replace").read()
         sizes.append((f, len(body)))
+        if line_numbers:
+            body = number_lines(body)
         parts.append(f"=== FILE: {f} ===\n{body}\n=== END FILE: {f} ===")
+    if line_numbers and parts:
+        parts.insert(0, LINENO_NOTE)
     parts.append(text)
     out = "\n\n".join(parts)
     if len(out) > limit:
@@ -932,7 +1004,7 @@ def cmd_ask(args):
     lim = max_context(getattr(args, "max_context", None))
     ctx = {"command": " ".join(sys.argv), "model_requested": args.model, "files": len(args.file or [])}
     try:
-        prompt = build_prompt(text, args.file, lim)
+        prompt = build_prompt(text, args.file, lim, line_numbers=getattr(args, "line_numbers", True))
     except ContextTooLarge as e:
         ctx["prompt_chars"] = e.total
         context_fail(e, "ask", ctx)
@@ -946,6 +1018,55 @@ def cmd_ask(args):
         log(f"answer written to {args.out} ({len(ans)} chars)")
     else:
         sys.stdout.write(ans if ans.endswith("\n") else ans + "\n")
+    if getattr(args, "verify_refs", None):
+        bad = verify_refs(ans, args.verify_refs)
+        if bad:
+            log(f"WARNING: {len(bad)} unverifiable path:line reference(s) in the answer (checked against "
+                f"{args.verify_refs}):\n" + "\n".join("  " + b for b in bad))
+        else:
+            log("verify-refs: every path:line reference exists")
+
+
+_REF_RE = r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z]\w{0,7}):(\d+)(?:[-\u2013](\d+))?"
+
+
+def verify_refs(answer, root):
+    """Warnings for `path:line[-line]` references of `answer` whose file is missing under `root`
+    (a unique basename also counts) or whose line is past the end of the file. It checks that the
+    reference EXISTS, not that it says the right thing."""
+    import re
+    root = os.path.abspath(root)
+    names = None
+    cache, bad, seen = {}, [], set()
+    for m in re.finditer(_REF_RE, answer):
+        path, a, b = m.group(1), int(m.group(2)), int(m.group(3) or m.group(2))
+        if (path, a, b) in seen:
+            continue
+        seen.add((path, a, b))
+        full = os.path.join(root, path)
+        if not os.path.isfile(full):
+            if names is None:
+                names = {}
+                for dp, dn, fn in os.walk(root):
+                    dn[:] = [d for d in dn if d not in (".git", "node_modules")]
+                    for f in fn:
+                        names.setdefault(f, []).append(os.path.join(dp, f))
+            hits = [h for h in names.get(os.path.basename(path), []) if h.endswith(os.sep + path)
+                    or os.path.basename(path) == path]
+            full = hits[0] if len(hits) == 1 else None
+        if not full:
+            bad.append(f"{path}:{a}: file not found")
+            continue
+        if full not in cache:
+            try:
+                txt = open(full, encoding="utf-8", errors="replace").read()
+                cache[full] = len(txt.split("\n")) - (1 if txt.endswith("\n") else 0)
+            except OSError:
+                cache[full] = 0
+        n = cache[full]
+        if a < 1 or max(a, b) > n:
+            bad.append(f"{path}:{a}{'-' + str(b) if b != a else ''}: file has only {n} lines")
+    return bad
 
 
 def cmd_batch(args):
@@ -1069,7 +1190,9 @@ def pack_tree(root, paths=None, counts=None):
     return items
 
 
-def render_tree(items):
+def render_tree(items, line_numbers=False):
+    if line_numbers:
+        items = [(f, number_lines(body)) for f, body in items]
     return "\n\n".join(f"=== BEGIN {f} ===\n{body}{'' if body.endswith(chr(10)) else chr(10)}=== END {f} ==="
                         for f, body in items)
 
@@ -1093,6 +1216,9 @@ After the code block you may add at most 5 lines of explanation.
 NEVER answer with a unified diff / git diff / `--- a/ +++ b/ @@` hunks / whole-file dumps: line
 numbers in diff headers are always miscounted. Only the 'ap' format is accepted."""
 
+LINENO_CODE_NOTE = ("\nThe codebase lines carry a display-only prefix 'N| ' (line number, bar, one space). It is NOT part "
+                    "of the files: never include it in ap snippets or content; copy only the text after it.")
+
 DIFF_RE = r"(?m)^(diff --git |--- (a/|/dev/null)|\+\+\+ (b/|/dev/null)|@@ -\d+(,\d+)? \+\d+(,\d+)? @@)"
 
 
@@ -1102,6 +1228,30 @@ def extract_patch(ans):
     if m:
         return max(m, key=len)
     return ans
+
+
+def patch_targets(patch):
+    """Files named by the `FILE` directives of an ap patch."""
+    import re
+    return [m.strip().strip("`") for m in
+            re.findall(r"(?m)^\S+[ \t]+FILE(?:[ \t]+\w+)?[ \t]*\n[ \t]*([^\n]+)", patch)]
+
+
+def tree_snapshot(root, paths):
+    """{path: bytes or None (missing)} for `paths` relative to `root`."""
+    snap = {}
+    for p in paths:
+        try:
+            snap[p] = open(os.path.join(root, p), "rb").read()
+        except OSError:
+            snap[p] = None
+    return snap
+
+
+def changed_files(before, root):
+    """Paths of `before` (a tree_snapshot) whose content differs now (created/modified/deleted)."""
+    now = tree_snapshot(root, before)
+    return [p for p in before if before[p] != now[p]]
 
 
 def looks_like_diff(text):
@@ -1235,7 +1385,8 @@ def cmd_code(args):
         except PathNotFound as e:
             print(f"ERROR: {e}", file=sys.stderr, flush=True)
             sys.exit(EXIT_CONTEXT)
-        tree = render_tree(items)
+        lnum = bool(getattr(args, "line_numbers", False))
+        tree = render_tree(items, lnum)
         RUN["files"] = dctx["files"] = len(items)
         if args.paths:
             log("context paths: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
@@ -1245,7 +1396,7 @@ def cmd_code(args):
             context_fail(ContextTooLarge(len(tree) + len(task or ""), lim, [(f, len(b)) for f, b in items],
                                          len(items)), "code", dctx)
         prompt = (f"<ap_spec>\n{spec}\n</ap_spec>\n\n<codebase>\n{tree}\n</codebase>\n\n"
-                  f"{CODE_RULES}\n\nTASK:\n{task}\n{history}")
+                  f"{CODE_RULES}{LINENO_CODE_NOTE if lnum else ''}\n\nTASK:\n{task}\n{history}")
         log(f"round {rnd}: asking {args.model} ({len(prompt)} chars of context)")
         ans = ask_many([(prompt, args.model, None)])[0]
         if isinstance(ans, Exception):
@@ -1270,6 +1421,8 @@ def cmd_code(args):
             if os.path.exists(os.path.join(root, stale)):
                 os.remove(os.path.join(root, stale))
         open(pfile, "w").write(patch)
+        targets = patch_targets(patch)
+        before = tree_snapshot(root, dict.fromkeys([f for f, _ in items] + targets))
         # Tolerant mode (default, no -s): ap self-heals what it can (fuzzy locators, ID drift,
         # missing header...), applies every modification that resolves and writes the ones that
         # do not to afailed.ap plus a repair briefing for the model to afailed.md.
@@ -1297,7 +1450,22 @@ def cmd_code(args):
                     os.remove(os.path.join(root, stale))
             continue
         os.remove(pfile)
-        log(f"round {rnd}: patch applied")
+        changed = changed_files(before, root)
+        if (ap.stdout or "").strip():
+            log(f"round {rnd}: ap output:\n{ap.stdout.strip()[-1500:]}")
+        log(f"round {rnd}: patch applied; files changed ({len(changed)}): {', '.join(changed) or 'NONE'}")
+        idle = [t for t in dict.fromkeys(targets) if t not in changed]
+        if not changed or idle:
+            what = ("the patch changed NOTHING in the working tree" if not changed else
+                    "the patch did not change: " + ", ".join(idle))
+            log(f"round {rnd}: PATCH_NOOP: ap exited 0 but {what}")
+            last_reason = "PATCH_NOOP"
+            last_detail = f"ap exited 0 but {what} (patch targets: {', '.join(targets) or '?'})"
+            history = (f"\nYOUR PREVIOUS PATCH WAS A NO-OP: the patcher reported success but {what}. Likely a "
+                       "REPLACE whose content equals its snippet (nothing new in it). Send a NEW ap patch "
+                       "whose content really differs from the snippet (to append: a REPLACE whose content is "
+                       "the snippet plus the new text).")
+            continue
         if args.ci:
             get_runs().note(f"round {rnd}: waiting for CI")
             ok, out = ci_check(root, branch, args.ci_base, title, args.ci_body or
@@ -1738,6 +1906,11 @@ def main():
     s.add_argument("-m", "--model", default=DEFAULT_MODEL); s.add_argument("-s", "--system")
     s.add_argument("-o", "--out"); s.add_argument("--max-context", type=int, help="max chars of packed context "
                    "(default $OFFLOAD_MAX_CONTEXT or 400000)")
+    s.add_argument("--line-numbers", dest="line_numbers", action="store_true", default=True,
+                   help="prefix file lines with 'N|' so the model cites exact path:line (default ON)")
+    s.add_argument("--no-line-numbers", dest="line_numbers", action="store_false")
+    s.add_argument("--verify-refs", metavar="DIR", help="after the answer, check every path:line reference "
+                   "against DIR and warn about files/lines that do not exist")
     watch_opts(s); s.set_defaults(fn=cmd_ask)
     s = sub.add_parser("whoami", help="email of the AI Studio account the profile is signed in with")
     s.set_defaults(fn=cmd_whoami)
@@ -1749,6 +1922,8 @@ def main():
     s = sub.add_parser("code", help="implement a task as an ap patch, apply it, run tests, iterate")
     s.add_argument("task", nargs="?", default="", help="task text or - for stdin"); s.add_argument("--task-file")
     s.add_argument("-C", "--dir", default="."); s.add_argument("-p", "--paths", nargs="+", action="extend")
+    s.add_argument("--line-numbers", action="store_true",
+                   help="number the codebase lines in the prompt (OFF by default: ap snippets are matched verbatim)")
     watch_opts(s)
     s.add_argument("--max-context", type=int, help="max chars of packed context (default "
                    "$OFFLOAD_MAX_CONTEXT or 400000); over the limit -> exit 3, nothing is truncated")

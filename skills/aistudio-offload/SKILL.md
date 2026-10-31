@@ -192,6 +192,10 @@ it as `OFFLOAD_CHAIN=...` to any sub-task derived from the answer.
   `screenshot.jpg`, `alerts.txt`) and prints `DIAG <REASON> <dir>: <message>`. Reasons: STALLED QUOTA RATE_LIMIT
   PERMISSION_DENIED CONTEXT_TOO_LARGE NOT_LOGGED_IN SAFETY EMPTY_ANSWER TIMEOUT UI_CHANGED PATCH_FAILED TESTS_FAILED
   UNKNOWN. `aistudio diag [N]` prints the last N summaries (routers may run it).
+  - `aistudio code` fails loudly with `DIAG PATCH_NOOP` (non-zero) when `ap` exits 0 but the patch left the working tree unchanged or left one of its target files untouched (live: "reported success" while the file was not changed); it logs `files changed (N): ...` after every applied patch, and the model is told to resend a real change.
+  - A response stream that is not valid JSON (truncated, or an error chunk such as `[,[7,"The caller does not have permission"]]` appended after the text; live: "Expecting ',' delimiter") is no longer an opaque JSON error: an error chunk becomes `AI Studio error: Permission denied...` (PERMISSION_DENIED/RATE_LIMIT, normal retry/fallback), a cut stream becomes `MALFORMED_RESPONSE` (retried); partial answers are never returned.
+  - `aistudio ask -f` numbers file lines (`  42| code`, prefix declared as not part of the file) by default so cited `path:line` refs are exact; `--no-line-numbers` disables it. `aistudio code` does NOT number by default (ap snippets are matched verbatim); `--line-numbers` opts in and the prompt says never to copy the prefix.
+  - `aistudio ask --verify-refs DIR` greps every `path:line` in the answer and warns about files/lines that do not exist (existence only, not correctness).
 - **Manager as a subagent**: `agents/claude/offload-manager.md` (`aistudio-offload-manager`, Haiku, gated by
   `aistudio guard --manager`) runs the orchestrator inside a Claude Code session instead of a separate `claude -p`.
 - **Agents load at session start**: `install.sh` copies `agents/claude/*.md` to `~/.claude/agents/`; Claude Code
