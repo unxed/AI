@@ -440,7 +440,9 @@ def ask_many(jobs, jobs_n=3, retries=2):
                 if attempt == retries or "login" in str(e):
                     return e
                 log(f"{m}: attempt {attempt + 1} failed: {e or type(e).__name__}; retrying")
-                time.sleep(5 * (attempt + 1))
+                # "Permission denied" comes and goes (more often right after a previous run):
+                # back off longer instead of hammering the account.
+                time.sleep((30 if "Permission denied" in str(e) else 5) * (attempt + 1))
 
     try:
         with ThreadPoolExecutor(max(1, jobs_n)) as ex:

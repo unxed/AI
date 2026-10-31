@@ -107,18 +107,28 @@ class Chrome:
             if not chrome:
                 raise RuntimeError("Google Chrome not found (install it, or set AISTUDIO_CHROME)")
             port = _free_port()
+            mode = os.environ.get("OFFLOAD_HEADLESS", "auto")  # auto | xvfb | new | off
+            use_xvfb = headless and mode in ("auto", "xvfb") and shutil.which("xvfb-run")
             args = [chrome, f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
-                    "--remote-allow-origins=*", f"--user-agent={UA}", "--lang=en-US",
+                    "--remote-allow-origins=*", "--lang=en-US",
                     f"--window-size={size[0]},{size[1]}", "--no-first-run",
                     "--no-default-browser-check", "--password-store=basic",
-                    "--disable-dev-shm-usage", "--disable-gpu", "--mute-audio",
+                    "--disable-dev-shm-usage", "--mute-audio",
                     "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
                     "--disable-backgrounding-occluded-windows", "about:blank"]
-            mode = os.environ.get("OFFLOAD_HEADLESS", "auto")  # auto | xvfb | new | off
-            if headless and mode in ("auto", "xvfb") and shutil.which("xvfb-run"):
+            if use_xvfb:
+                # Software WebGL (SwiftShader): with --disable-gpu, getContext('webgl') is null,
+                # a bot-ish fingerprint.
+                args[-1:-1] = ["--use-gl=angle", "--use-angle=swiftshader",
+                               "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"]
+            else:
+                args[-1:-1] = ["--disable-gpu", f"--user-agent={UA}"]
+            if use_xvfb:
                 # A normal (headed) Chrome on a virtual display: no window anywhere, and none of
                 # the headless fingerprints (e.g. "HeadlessChrome" in userAgentData) that make
-                # AI Studio answer "Permission denied".
+                # AI Studio answer "Permission denied". The real UA is kept: overriding it with
+                # --user-agent leaves navigator.userAgentData.fullVersionList/platformVersion
+                # empty, which does not match a genuine Chrome.
                 args = ["xvfb-run", "-a", "-s", f"-screen 0 {size[0]}x{size[1] + 120}x24"] + args
             elif headless and mode != "off":
                 args.insert(1, "--headless=new")
