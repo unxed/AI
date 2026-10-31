@@ -118,6 +118,7 @@ heartbeat (with `phase=`), the status file and the retry rules, but not the page
 
 ```bash
 grok status --runs      # one line per run: pid, model, attempt, state, answer_chars, silent_for, health
+# answer_chars = size of the raw streamed response (includes the model's thinking), not of the final answer text
 grok status --runs --json
 ```
 

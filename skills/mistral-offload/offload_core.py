@@ -1470,8 +1470,17 @@ def _check_manager_segment(argv):
     return None
 
 
-def check_manager_command(cmd):
-    """Reason a Bash command is forbidden for the manager, or None."""
+def _abs_target(target, cwd):
+    t = os.path.expanduser(target)
+    if not t or os.path.isabs(t) or not cwd:
+        return t
+    return os.path.normpath(os.path.join(cwd, t))
+
+
+def check_manager_command(cmd, cwd=None):
+    """Reason a Bash command is forbidden for the manager, or None.
+
+    Relative redirect targets are resolved against `cwd` (the hook's cwd) and any `cd DIR` before them."""
     try:
         toks = _manager_tokens(cmd)
     except ValueError:
@@ -1483,6 +1492,9 @@ def check_manager_command(cmd):
             why = _check_manager_segment(seg)
             if why:
                 return why
+            if len(seg) == 2 and seg[0] == "cd":
+                d = os.path.expanduser(seg[1])
+                cwd = os.path.normpath(d if os.path.isabs(d) else os.path.join(cwd or "/", d))
             seg = []
         elif t.startswith("<<"):
             return "heredocs / here-strings are not allowed"
@@ -1491,7 +1503,7 @@ def check_manager_command(cmd):
             i += 1
             if t.endswith("&") and (target.isdigit() or target == "-"):
                 pass  # fd duplication: 2>&1, >&2
-            elif not _tmp_ok(target):
+            elif not _tmp_ok(_abs_target(target, cwd)):
                 return f"output redirection to {target or '?'} writes a file"
         else:
             seg.append(t)
@@ -1499,7 +1511,7 @@ def check_manager_command(cmd):
     return None
 
 
-def check_manager_tool(tool, tool_input):
+def check_manager_tool(tool, tool_input, cwd=None):
     """Orchestrator gate for a small manager model: None if the tool call is allowed, else why not."""
     import fnmatch
     tool_input = tool_input or {}
@@ -1512,7 +1524,7 @@ def check_manager_tool(tool, tool_input):
             return None
         return f"Write to {path or '?'} is forbidden (only task descriptions: task*.md, *.task.md, tasks/)"
     if tool == "Bash":
-        return check_manager_command(tool_input.get("command", ""))
+        return check_manager_command(tool_input.get("command", ""), cwd)
     return None
 
 
@@ -1525,7 +1537,7 @@ def cmd_guard(args):
         sys.exit(2)
     tool = ev.get("tool_name", "")
     if getattr(args, "manager", False):
-        why = check_manager_tool(tool, ev.get("tool_input"))
+        why = check_manager_tool(tool, ev.get("tool_input"), ev.get("cwd"))
         if why:
             print(f"MANAGER GATE: {why}. You orchestrate only: give substantive work (code, analysis, "
                   "triage, texts, markdown edits) to a router subagent (gemini-router / mistral-router) "

@@ -16,7 +16,7 @@ texts, markdown edits. You read state, write a task file (task*.md), run `deepse
 (git diff, tests, CI), commit and push. The gate blocks your own edits, inline code and file writes.
 
 - Code: `timeout 1500 deepseek-chat code --task-file task.md -C <repo> -p <file> -p <file> [-t "<test>"]`
-- Anything else: `timeout 900 deepseek-chat ask -f <file> ... "<short instruction>"`
+- Anything else: `timeout 900 deepseek-chat ask -f <file> ... "<short instruction>"` (save the answer with `-o <file>`)
 - Pass ONLY relevant files (limit 400000 chars; exit 3 CONTEXT_TOO_LARGE = narrow the list yourself).
 - Task text goes into a file, never into a double-quoted shell argument with backticks or `$(...)`.
 - After any non-zero exit run `deepseek-chat diag` and quote the DIAG line and reason in your report;

@@ -65,3 +65,14 @@ def test_guard_manager_cli():
     assert r.returncode == 2 and r.stderr.startswith("MANAGER GATE:") and "router subagent" in r.stderr
     assert run_guard("Bash", {"command": "git status"}).returncode == 0
     assert run_guard("Bash", {"command": "python3 -c 1"}).returncode == 2
+
+
+def test_relative_redirect_resolved_against_cwd_and_cd():
+    import offload_core as oc
+    w = "/tmp/lunobot-2/work/x"
+    assert oc.check_manager_command("gh pr view 1 > pr.txt", cwd=w) is None
+    assert oc.check_manager_command(f"cd {w} && gh pr view 1 > pr.txt") is None
+    assert oc.check_manager_command("cd /tmp/lunobot-2/work && echo a >> x/debug.md") is None
+    assert oc.check_manager_command("gh pr view 1 > pr.txt", cwd="/home/u/repo") is not None
+    assert oc.check_manager_command(f"cd {w} && echo a > ../../../../home/u/f") is not None
+    assert oc.check_manager_tool("Bash", {"command": "echo a > d.md"}, cwd=w) is None
