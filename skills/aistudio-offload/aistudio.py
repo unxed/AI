@@ -35,6 +35,9 @@ PORT_FILE = os.path.join(HOME, "chrome.port")
 DEFAULT_MODEL = os.environ.get("AISTUDIO_MODEL", "gemini-3.8-flash")
 BASE = "https://aistudio.google.com"
 GEN_RPC = "MakerSuiteService/GenerateContent"
+PROG = "aistudio"  # provider wrappers (e.g. grok-offload) override these globals
+LOGIN_URL = f"https://accounts.google.com/ServiceLogin?continue={BASE}/prompts/new_chat"
+DONE_HOST = "aistudio.google.com"
 
 
 def log(*a):
@@ -45,6 +48,10 @@ def log(*a):
 def _logged_in(cookies):
     names = {c["name"] for c in cookies if c["domain"].endswith("google.com")}
     return "SID" in names or "__Secure-1PSID" in names
+
+
+def logged_in(cookies):  # indirection so provider wrappers can replace it
+    return _logged_in(cookies)
 
 
 def _save_cookies(ck):
@@ -123,7 +130,7 @@ def cmd_login(args):
             st = url[:70]
             if args.done_host in url:
                 ck = ch.cookies()
-                if _logged_in(ck):
+                if logged_in(ck):
                     _save_cookies(ck)
                     state["done"] = True
                     st = "DONE"
@@ -176,7 +183,7 @@ def cmd_import_cookies(args):
         c["sameSite"] = {"No_restriction": "None", "Unspecified": "Lax"}.get(ss, ss)
     _save_cookies(ck)
     shutil.rmtree(PROFILE, ignore_errors=True)  # next start seeds the profile from cookies
-    print(f"{len(ck)} cookies imported. Logged in: {_logged_in(ck)}")
+    print(f"{len(ck)} cookies imported. Logged in: {logged_in(ck)}")
 
 
 def cmd_export_cookies(args):
@@ -289,7 +296,7 @@ def ask_many(jobs, jobs_n=3, retries=2):
         prompt, model, system = job
         for attempt in range(retries + 1):
             try:
-                return ask_tab(ch, prompt, model or DEFAULT_MODEL, system)
+                return globals()["ask_tab"](ch, prompt, model or DEFAULT_MODEL, system)
             except Exception as e:
                 if attempt == retries or "login" in str(e):
                     return e
@@ -456,6 +463,7 @@ def cmd_code(args):
 # ---------------------------------------------------------------- router gate
 
 ROUTER_SUBCMDS = ("ask", "code", "batch", "status", "serve")
+ROUTER_BINARIES = ("aistudio", "aistudio.py", "grok", "grok.py")
 
 
 def check_router_command(cmd):
@@ -485,8 +493,8 @@ def check_router_command(cmd):
         if not argv[0].startswith("AISTUDIO_"):
             return "only AISTUDIO_* environment assignments are allowed"
         argv = argv[1:]
-    if not argv or os.path.basename(argv[0]) not in ("aistudio", "aistudio.py"):
-        return "only the `aistudio` command is allowed"
+    if not argv or os.path.basename(argv[0]) not in ROUTER_BINARIES:
+        return f"only these commands are allowed: {', '.join(ROUTER_BINARIES)}"
     if len(argv) < 2 or argv[1] not in ROUTER_SUBCMDS:
         return f"allowed subcommands: {', '.join(ROUTER_SUBCMDS)}"
     return None
@@ -514,18 +522,18 @@ def cmd_guard(args):
 
 
 def cmd_status(args):
-    ok = os.path.exists(COOKIES) and _logged_in(json.load(open(COOKIES)))
+    ok = os.path.exists(COOKIES) and logged_in(json.load(open(COOKIES)))
     print(f"logged_in={ok} chrome_running={os.path.exists(PORT_FILE)} home={HOME} default_model={DEFAULT_MODEL}")
     sys.exit(0 if ok else 1)
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog=PROG, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("login", help="sign in via a headless browser + web remote page")
     s.add_argument("--port", type=int, default=8766); s.add_argument("--timeout", type=int, default=1800)
-    s.add_argument("--url", default=f"https://accounts.google.com/ServiceLogin?continue={BASE}/prompts/new_chat")
-    s.add_argument("--done-host", default="aistudio.google.com")
+    s.add_argument("--url", default=LOGIN_URL)
+    s.add_argument("--done-host", default=DONE_HOST)
     s.set_defaults(fn=cmd_login)
     s = sub.add_parser("import-cookies"); s.add_argument("file"); s.set_defaults(fn=cmd_import_cookies)
     s = sub.add_parser("export-cookies"); s.set_defaults(fn=cmd_export_cookies)

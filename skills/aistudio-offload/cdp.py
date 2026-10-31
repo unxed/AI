@@ -254,6 +254,30 @@ class Tab:
             self.c.pump(1.0)
         raise TimeoutError(f"no finished response for {url_part}")
 
+    def collect_ws(self, trigger, on_frame, timeout=900):
+        """Enable Network, run trigger(), feed every received WebSocket text frame to
+        on_frame(payload); stop when it returns a non-None value and return that."""
+        self.c.call("Network.enable")
+        self.c.events.clear()
+        trigger()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            while self.c.events:
+                e = self.c.events.pop(0)
+                if e["method"] == "Network.webSocketFrameReceived":
+                    r = on_frame(e["params"]["response"].get("payloadData", ""))
+                    if r is not None:
+                        return r
+            self.c.pump(1.0)
+        raise TimeoutError("no complete answer on the websocket")
+
+    def set_files(self, selector, paths):
+        root = self.c.call("DOM.getDocument", depth=-1, pierce=True)["root"]["nodeId"]
+        node = self.c.call("DOM.querySelector", nodeId=root, selector=selector)["nodeId"]
+        if not node:
+            raise RuntimeError(f"file input not found: {selector}")
+        self.c.call("DOM.setFileInputFiles", nodeId=node, files=[os.path.abspath(p) for p in paths])
+
     def close(self):
         self.c.close()
         try:
