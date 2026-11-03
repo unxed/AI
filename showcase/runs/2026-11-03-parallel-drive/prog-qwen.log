@@ -42,3 +42,5 @@
 23:00:06 39b ref stale; clicked send arrow by coordinate (756,543) -> polling
 23:01:05 40 poll: last action block unchanged (sed 18,35) -> checking whether model re-sent or is still streaming
 23:01:11 41 model action 7 run (sed qwen SKILL 140-155) -> exit=0, sending
+23:01:15 42 action 7 result ready (1016 chars, full) -> pasting
+23:01:28 43 clicked send arrow (756,543) with action-7 result -> polling
