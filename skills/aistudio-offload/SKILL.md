@@ -109,9 +109,21 @@ description: Offload thinking and code writing to Google Gemini in AI Studio (ai
 {"action":"write","path":"<path relative to the work dir>","content":"<full file text>"}
 {"action":"done","summary":"<what was done>"}
 {"action":"blocked","reason":"<why the model cannot continue>"}
+{"action":"attach","url":"https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>"}
 ```
 
 Правки кода можно присылать и патчем `ap`: вместо `run` с `ap <file> ...` — `{"action":"ap","patch":"<ap patch text>"}`; роутер применяет его через `ap --dir <work dir>` по шагу 5.
+
+**Вложения без перепечатки (attach).** Файлы из публичных репозиториев GitHub роутер не перепечатывает, а прикрепляет к сообщению файлом: страница сама скачивает их по `https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>` (raw.githubusercontent.com отдаёт CORS-заголовок). Роутер выполняет через `javascript_tool` по своему `tabId` ровно этот фрагмент, подставив только URL и имя файла:
+
+```js
+const url='<URL>', name='<ИМЯ ФАЙЛА>'; const r=await fetch(url); if(!r.ok) throw new Error('fetch '+r.status); const t=await r.text(); const inp=document.querySelector('input[type=file]'); const dt=new DataTransfer(); dt.items.add(new File([t],name,{type:'text/plain'})); inp.files=dt.files; inp.dispatchEvent(new Event('change',{bubbles:true})); t.length
+```
+
+Затем проверяет скриншотом, что над полем ввода появилась плашка файла, и отправляет сообщение. Это единственное разрешённое применение `javascript_tool` для изменения страницы. Работает в чатах, где есть `input[type=file]` (DeepSeek принимает .md, .txt, .log и код); если поля нет — сообщить вызывающему.
+
+- В первом промпте большие публичные файлы (например, LUNOBOT.md) прикладываются так, а не текстом.
+- Действие модели `{"action":"attach","url":"https://raw.githubusercontent.com/..."}`: роутер прикрепляет файл к следующему сообщению и отвечает `attached <имя> (<символов> chars)`. URL — только raw.githubusercontent.com.
 
 **Выполнение роутером.**
 - `run`: выполнить команду через Bash в рабочем каталоге с указанным таймаутом (максимум 600 с); ответить модели в том же чате строкой `exit=<code>` и stdout+stderr, обрезанными до последних 3000 символов с пометкой `[truncated N chars]` (роутер перепечатывает вывод своими токенами, поэтому объём минимальный).
