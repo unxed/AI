@@ -52,3 +52,6 @@
 23:02:53 52 run#3 reply still thinking (len 9544 unchanged), polling toward 8 min cap
 23:04:06 53 run#3 reply: polling (about 5 min since send, 8 min cap at ~23:06)
 23:05:10 54 run#3 reply: still no change, polling (8 min cap ~23:06)
+23:06:22 55 run#3 reply: polled at ~7 min since send, still no change
+23:07:07 56 run#3 reply final poll before 8-min cap
+23:07:14 57 8-min cap reached (sent 22:58:13); reply to run#3 still 'Thinking...' with unchanged text -> STOP per caller; closed own tabs tab-5 and tab-4. Status: blocked. Final report sent.

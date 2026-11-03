@@ -55,3 +55,8 @@
 23:04:53 52 poll for answer 10
 23:05:01 53 model action 10 run (wc + sed qwen SKILL 140-155, 26-35) -> exit=0, sending. NOTE: model rereads sections, no edits yet; deadline 23:15
 23:05:06 54 action 10 result ready (1654 chars) -> pasting
+23:05:52 55 sent action-10 result; polling answer 11
+23:05:59 56 model action 11 run (loop over 9 SKILL.md wc + sed 143-147) -> exit=0, sending
+23:06:06 57 action 11 result ready (7593 chars -> last 3000) -> pasting
+23:06:21 58 PROBLEM: in action-11 relay, last line typed as 'Без файла — подпись.' instead of 'однострочная заметка вызывающему после каждого действия.' (1-phrase transcription error, disclosed)
+23:07:01 59 sent action-11 result; polling answer 12
