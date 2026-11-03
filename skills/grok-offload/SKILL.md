@@ -51,7 +51,7 @@ description: Offload thinking and code writing to Grok inside X (x.com/i/grok we
 5. Если клики или скриншоты падают с "not on screen and has not drawn yet", встроенная панель браузера скрыта: отправь промпт клавишей Enter через `computer` key "Return" после `form_input`, читай через `get_page_text`; если отправка всё равно не работает, сообщи и попроси вызывающего показать панель браузера. Не использовать javascript_tool для клика.
 6. Отправить: `find` кнопку отправки и `computer` click (или Enter).
 
-**Формат кода (обязательно).** Код возвращается только патчем `ap`, не unified diff. Вставить в промпт целиком содержимое `~/dev/AI/skills/grok-offload/vendor/ap.md` и добавить:
+**Формат кода (обязательно).** Код возвращается только патчем `ap`, не unified diff. Вставить в промпт целиком содержимое `~/dev/AI/skills/grok-offload/vendor/ap.md`. Если в чате есть загрузка файлов, спецификация прикладывается вложением через attach (`https://raw.githubusercontent.com/unxed/AI/main/skills/grok-offload/vendor/ap.md`), а в промпте — одна строка «Спецификация формата ap — во вложении ap.md.»; текстом её не перепечатывать. В промпт добавить:
 
 > Ответь ТОЛЬКО одним патчем в формате `ap` по приложенной спецификации (AP 3.2): один блок ```ap, случайный 8-hex ID патча, директивы FILE / REPLACE / INSERT_AFTER с `snippet` / `content`, скопированные дословно из присланных файлов. Unified diff, `git diff`, заголовки `--- a/` `+++ b/`, хунки `@@` и дампы целых файлов ЗАПРЕЩЕНЫ. Никаких пояснений вне блока.
 
