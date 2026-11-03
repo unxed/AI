@@ -8,6 +8,13 @@
 | [`skills/mistral-offload`](skills/mistral-offload/SKILL.md) | Mistral Le Chat |
 | [`skills/deepseek-offload`](skills/deepseek-offload/SKILL.md) | DeepSeek |
 | [`skills/grok-offload`](skills/grok-offload/SKILL.md) | Grok в X |
+| [`skills/qwen-offload`](skills/qwen-offload/SKILL.md) | Qwen Chat |
+| [`skills/zai-offload`](skills/zai-offload/SKILL.md) | Z.ai (GLM) |
+| [`skills/arena-offload`](skills/arena-offload/SKILL.md) | Arena: одна выбранная модель, переписка может стать публичной |
+| [`skills/cerebras-offload`](skills/cerebras-offload/SKILL.md) | Cerebras (Qwen, GPT OSS) |
+| [`skills/copilot-offload`](skills/copilot-offload/SKILL.md) | Microsoft Copilot: **пока не работает** (запрос не отправляется) |
+
+Qwen, Z.ai, Arena и Cerebras проверены настоящим запросом 2026-11-03: роутер на Claude Haiku, тексты скиллов написала Gemini через `aistudio-offload`. Вывод из проверок: текст в поле ввода надо печатать (`computer` type), а не подставлять через `form_input`. Подстановка не даёт событий клавиатуры, и Z.ai и Copilot отвечают на неё капчей.
 
 Каждый скилл — это `SKILL.md`, инструкция агенту. У каждого скилла есть `vendor/`: спецификация формата [ap](https://github.com/unxed/ap) (`ap.md`) и патчер (`ap.py`). Код модель возвращает только патчем `ap`, unified diff запрещён.
 
