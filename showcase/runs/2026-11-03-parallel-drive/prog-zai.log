@@ -48,3 +48,7 @@
 23:00:29 48 run#3 reply pending, polling (generating)
 23:00:35 49 polled run#3 reply (~3 min since send)
 23:01:39 50 run#3 reply still thinking, polling
+23:01:48 51 polled run#3 reply (~4 min since send)
+23:02:53 52 run#3 reply still thinking (len 9544 unchanged), polling toward 8 min cap
+23:04:06 53 run#3 reply: polling (about 5 min since send, 8 min cap at ~23:06)
+23:05:10 54 run#3 reply: still no change, polling (8 min cap ~23:06)
