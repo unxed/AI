@@ -10,7 +10,7 @@
 | [`skills/grok-offload`](skills/grok-offload/SKILL.md) | Grok в X |
 | [`skills/qwen-offload`](skills/qwen-offload/SKILL.md) | Qwen Chat |
 | [`skills/zai-offload`](skills/zai-offload/SKILL.md) | Z.ai (GLM) |
-| [`skills/arena-offload`](skills/arena-offload/SKILL.md) | Arena: одна выбранная модель, переписка может стать публичной |
+| [`skills/arena-offload`](skills/arena-offload/SKILL.md) | Arena: одна выбранная модель; переписка может стать публичной, поэтому только для задач с публичными данными |
 | [`skills/cerebras-offload`](skills/cerebras-offload/SKILL.md) | Cerebras (Qwen, GPT OSS) |
 | [`skills/copilot-offload`](skills/copilot-offload/SKILL.md) | Microsoft Copilot: **пока не работает** (запрос не отправляется) |
 
