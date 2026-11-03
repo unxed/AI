@@ -60,3 +60,5 @@
 23:06:06 57 action 11 result ready (7593 chars -> last 3000) -> pasting
 23:06:21 58 PROBLEM: in action-11 relay, last line typed as 'Без файла — подпись.' instead of 'однострочная заметка вызывающему после каждого действия.' (1-phrase transcription error, disclosed)
 23:07:01 59 sent action-11 result; polling answer 12
+23:08:39 60 PROBLEM: Send no longer submits (ref/coordinate clicks and Return tried; composer keeps text, sent11=false) with deadline ~23:15 near; stopping run, no edits made by model; closing own tab-8
+23:08:44 61 tab-8 closed (own tab); final status blocked
