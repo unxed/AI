@@ -4,6 +4,7 @@
 
 | Скилл | Модель |
 |---|---|
+| [`OPERATOR.md`](OPERATOR.md) | оператор: несколько роутеров параллельно |
 | [`skills/aistudio-offload`](skills/aistudio-offload/SKILL.md) | Gemini в AI Studio |
 | [`skills/mistral-offload`](skills/mistral-offload/SKILL.md) | Mistral Le Chat |
 | [`skills/deepseek-offload`](skills/deepseek-offload/SKILL.md) | DeepSeek |
