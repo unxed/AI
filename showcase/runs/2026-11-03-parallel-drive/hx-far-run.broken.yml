@@ -1,0 +1,177 @@
+name: hx-far-run
+run-name: "hx-far-run HX ${{ inputs.hx }} ${{ inputs.cputype }}/${{ inputs.core }} ${{ inputs.args }}"
+
+# Stand: Far Manager x86 under the HX runtime in DOSBox-X, screenshots (hx-far/README.md).
+
+on:
+  workflow_dispatch:
+    inputs:
+      far:
+        description: URL of a Far x86 .7z (default - latest Far 3 x86 of FarGroup/FarManager)
+        default: ""
+      hx:
+        description: release tag of Baron-von-Riedesel/HX for HXRT/HXGUI
+        default: v2.23
+      args:
+        description: arguments of far.exe
+        default: "-p"
+      stubs:
+        description: empty stand-in DLLs to put next to far.exe
+        default: "imm32 netapi32 psapi rpcrt4 secur32 setupapi userenv winspool.drv"
+      dpmildr:
+        description: value of DPMILDR (128 = start even with unresolved imports)
+        default: "128"
+      hxbuild:
+        description: run ids of hx-build (space-separated, later wins) whose DLLs replace those of the release (SBEMUD, SBEMU, DEBUG, RELEASE)
+        default: ""
+ dosbox_build:
+ description: build DOSBox-X from source (repo/ref) and use it instead of the apt package, e.g. for SSE2
+ type: boolean
+ default: false
+ dosbox_repo:
+ description: DOSBox-X repository (owner/name) for dosbox_build
+ default: joncampbell123/dosbox-x
+ dosbox_ref:
+ description: branch, tag or commit of DOSBox-X for dosbox_build (must include the SSE2 PR #6716)
+ default: master
+      dosbox_run:
+        description: run id of dosbox-x-test whose binary (artifact dosbox-x-bin) replaces DOSBox-X from apt
+        default: ""
+      sse2:
+        description: "enable sse2 = true in the guest (a DOSBox-X from a branch with SSE2)"
+        type: boolean
+        default: false
+      keys:
+        description: "keys by time, <sec>:<xdotool key> separated by spaces (e.g. 30:Down 31:Return 50:F10)"
+        default: ""
+      shots:
+        description: seconds of screenshots (the last one is also the end of the run)
+        default: "5 15 30 60 89"
+      cputype:
+        description: DOSBox-X cputype (pentium_iii has SSE; DOSBox-X has no SSE2)
+        default: pentium_iii
+      core:
+        description: DOSBox-X core
+        default: normal
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dosbox-x xvfb xdotool imagemagick gcc-mingw-w64-i686 p7zip-full unzip > /dev/null
+          dosbox-x -version 2>&1 | head -2 || true
+       - name: build DOSBox-X
+       if: inputs.dosbox_build
+       env:
+       CC: ccache gcc
+       CXX: ccache g++
+       run: |
+       sudo apt-get install -y -qq autoconf automake libtool nasm pkg-config libsdl2-dev libsdl2-net-dev \
+       libpng-dev libfreetype-dev libx11-dev libxrandr-dev libxkbfile-dev libncurses-dev zlib1g-dev \
+       libpcap-dev libslirp-dev ccache > /dev/null
+       git clone --depth=1 --branch "{{ inputs.dosbox_ref }}" \
+       "https://github.com/{{ inputs.dosbox_repo }}" dbxsrc
+       cd dbxsrc
+       git log -1 --format='%H %s' | tee -a "GITHUB_STEP_SUMMARY"
+       ./autoconf.sh
+       ./configure --enable-sdl2 --disable-debug --disable-alsa-midi --disable-opengl
+       make -j"(nproc)" 2>&1 | tail -30
+       ls -la src/dosbox-x
+       echo "DOSBOX=
+      GITHUB_ENV"
+       "$PWD/src/dosbox-x" -version 2>&1 | head -2 || true
+      - name: DOSBox-X from a run
+        if: inputs.dosbox_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ inputs.dosbox_run }}" -R "$GITHUB_REPOSITORY" -n dosbox-x-bin -D dbxbin
+          chmod +x dbxbin/dosbox-x
+          echo "DOSBOX=$PWD/dbxbin/dosbox-x" >> "$GITHUB_ENV"
+          "$PWD/dbxbin/dosbox-x" -version 2>&1 | head -2 || true
+      - name: HX runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.hx }}" -R Baron-von-Riedesel/HX -p 'HXRT*.zip' -p 'HXGUI*.zip' -D dl
+          mkdir -p c/HX c/OUT x
+          for z in dl/*.zip; do unzip -q -o "$z" -d x; done
+          find x -ipath '*/bin/*' -type f -exec cp -f {} c/HX/ \;
+          # several runs: later ones win
+          for r in ${{ inputs.hxbuild }}; do
+            rm -rf built
+            gh run download "$r" -R "$GITHUB_REPOSITORY" -n hx-build -D built
+            for d in built/*/; do
+              v=; for c in SBEMUD SBEMU DEBUG RELEASE; do [ -d "$d$c" ] && { v=$d$c; break; }; done
+              for f in "$v"/*.DLL; do cp -fv "$f" c/HX/; done
+            done
+          done
+          ls c/HX
+      - name: Far
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAR_URL: ${{ inputs.far }}
+        run: |
+          if [ -z "$FAR_URL" ]; then
+            FAR_URL=$(gh release view -R FarGroup/FarManager --json assets \
+              --jq '.assets[] | select(.name|test("_x86_.*[0-9a-f]\\.7z$")) | .url' | head -1)
+          fi
+          echo "Far: $FAR_URL" | tee -a "$GITHUB_STEP_SUMMARY"
+          curl -fsSL -o far.7z "$FAR_URL"
+          7z x -y -oc/FAR far.7z > /dev/null
+          ls c/FAR
+      - name: stub DLLs
+        run: |
+          for d in ${{ inputs.stubs }}; do
+            case $d in *.*) f=$d ;; *) f=$d.dll ;; esac
+            i686-w64-mingw32-gcc -shared -nostdlib -O2 -o "c/FAR/$f" hx-far/stub.c \
+              -Wl,-e,_DllMainCRTStartup@12 -Wl,--kill-at
+            echo "stub: $f"
+          done
+      - name: RUN.BAT
+        run: |
+          {
+            echo '@echo off'
+            echo 'set PATH=C:\HX;%PATH%'
+            echo 'set DPMILDR=${{ inputs.dpmildr }}'
+            echo 'set DKRNLLOG=C:\OUT\DKRNL.LOG'
+            echo 'ver > C:\OUT\VER.TXT'
+            echo 'C:\HX\HDPMI32.EXE -r > C:\OUT\HDPMI.TXT'
+            echo 'cd \FAR'
+            echo 'C:\HX\DPMILD32.EXE FAR.EXE -? > C:\OUT\HELP.TXT'
+            echo 'echo errorlevel after far -?: >> C:\OUT\HELP.TXT'
+            echo 'if errorlevel 1 echo 1 or more >> C:\OUT\HELP.TXT'
+            echo 'C:\HX\DPMILD32.EXE FAR.EXE ${{ inputs.args }}'
+            echo 'echo far exited > C:\OUT\EXIT.TXT'
+          } | sed 's/$/\r/' > c/RUN.BAT
+          cat c/RUN.BAT
+      - name: run
+        env:
+          CPUTYPE: ${{ inputs.cputype }}
+          CORE: ${{ inputs.core }}
+          KEYS: ${{ inputs.keys }}
+          SSE2: ${{ inputs.sse2 }}
+          SHOTS: ${{ inputs.shots }}
+        run: |
+          last=${SHOTS##* }
+          hx-far/run.sh "$PWD/c" "$PWD/out" $((last + 1)) $SHOTS
+      - name: results
+        if: always()
+        run: |
+          cp -r c/OUT out/dos 2>/dev/null || true
+          for f in out/dos/*; do echo "== $f"; cat "$f"; echo; done | tee -a "$GITHUB_STEP_SUMMARY"
+          tail -30 out/dosbox-x.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hx-far-run
+          path: out

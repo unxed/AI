@@ -39,3 +39,10 @@ Done earlier today: DeepSeek closed unxed/lunobot#262 (fix already merged in PR 
 - Owner note: they usually attach ap.md + the needed repo files as ONE file built with ~/dev/ap/tools/combine.py. TODO: consider it for the skills (delivery of a local file without retyping is the open question).
 - QWEN STOPPED 23:08: Send stopped submitting (ref click, coordinate click and Return all failed; composer kept its text), deadline near, no edits. Possibly a Qwen rate limit or composer state. Fail-fast task for unxed/AI NOT done; redo it in a new session (maybe with aistudio/deepseek). ALL 5 runs are now finished.
 - 9ddc1df pushed: drive mode attaches whole files (the caller names them), the model requests files via attach instead of sed chunks, REPEAT guard for identical actions. luno-task.md template updated to match.
+
+## 2026-11-04
+- go2dos#70 (SSE2 stand, DeepSeek) STOPPED: about 50 actions of reading, then an ap patch with broken YAML indentation, then a `write` whose JSON came out garbled (Unicode italic letters, broken quotes — page markdown rendering). Nothing was pushed. The broken file is saved as offload/hx-far-run.broken.yml and the clone was reverted. Classes: DSML format (17e8ce6), reading loop with overlapping ranges (04fdf16). Open: no syntax feedback after ap/write; large `write` content gets mangled.
+- f4#2216 (fix and merge the calendar PR, DeepSeek) still running.
+- LUNOBOT 33aee9e: contributor-friendly rule in caps (§ 6 and the merge module).
+- HX#75: polite reminder about PR #76 posted (owner approved).
+- f4#2230 was auto-closed by `Fixes` in #2252; reopen pending the owner's decision.
