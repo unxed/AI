@@ -6,7 +6,7 @@
 |---|---|
 | [`OPERATOR.md`](OPERATOR.md) | оператор: несколько роутеров параллельно |
 | [`skills/aistudio-offload`](skills/aistudio-offload/SKILL.md) | Gemini в AI Studio |
-| [`skills/mistral-offload`](skills/mistral-offload/SKILL.md) | Mistral Le Chat |
+| [`skills/mistral-offload`](skills/mistral-offload/SKILL.md) | Mistral Le Chat — **не используется** (решение владельца 04-11-2026: лимит ~20 сообщений, не стоит того) |
 | [`skills/deepseek-offload`](skills/deepseek-offload/SKILL.md) | DeepSeek |
 | [`skills/grok-offload`](skills/grok-offload/SKILL.md) | Grok в X |
 | [`skills/qwen-offload`](skills/qwen-offload/SKILL.md) | Qwen Chat |

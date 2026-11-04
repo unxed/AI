@@ -1,6 +1,6 @@
 ---
 name: mistral-offload
-description: Offload thinking and code writing to Mistral Le Chat (chat.mistral.ai web UI, not the API). The agent drives Claude built-in browser tools in its own tab, pastes the prompt and reads the reply. Code comes back only as an ap patch (https://github.com/unxed/ap), never as a unified diff. Use when the user asks to offload to Mistral or Le Chat, or wants Mistral to write, refactor or analyze code or text. The router never does the task itself.
+description: NOT USED (owner decision 2026-11-04, ~20-message limit; do not use). Offload thinking and code writing to Mistral Le Chat (chat.mistral.ai web UI, not the API). The agent drives Claude built-in browser tools in its own tab, pastes the prompt and reads the reply. Code comes back only as an ap patch (https://github.com/unxed/ap), never as a unified diff. Use when the user asks to offload to Mistral or Le Chat, or wants Mistral to write, refactor or analyze code or text. The router never does the task itself.
 ---
 
 # Le Chat offload
