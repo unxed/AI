@@ -1,6 +1,6 @@
 ---
 name: copilot-offload
-description: Offload thinking and code writing to Microsoft Copilot web chat (copilot.microsoft.com, not the API). The agent drives Claude built-in browser tools in its own tab, pastes the prompt and reads the reply. Code comes back only as an ap patch (https://github.com/unxed/ap), never as a unified diff. Use when the user asks to offload to Copilot, or wants Copilot to write, refactor or analyze code or text. The router never does the task itself.
+description: NOT USED (owner decision 2026-11-04: the site shows CAPTCHAs; we do not work around services that protect themselves). Offload thinking and code writing to Microsoft Copilot web chat (copilot.microsoft.com, not the API). The agent drives Claude built-in browser tools in its own tab, pastes the prompt and reads the reply. Code comes back only as an ap patch (https://github.com/unxed/ap), never as a unified diff. Use when the user asks to offload to Copilot, or wants Copilot to write, refactor or analyze code or text. The router never does the task itself.
 ---
 
 # Copilot offload

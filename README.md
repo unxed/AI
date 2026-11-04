@@ -10,10 +10,10 @@
 | [`skills/deepseek-offload`](skills/deepseek-offload/SKILL.md) | DeepSeek |
 | [`skills/grok-offload`](skills/grok-offload/SKILL.md) | Grok в X |
 | [`skills/qwen-offload`](skills/qwen-offload/SKILL.md) | Qwen Chat |
-| [`skills/zai-offload`](skills/zai-offload/SKILL.md) | Z.ai (GLM) |
+| [`skills/zai-offload`](skills/zai-offload/SKILL.md) | Z.ai (GLM) — **не используется**: показывает капчу (решение владельца 04-11-2026) |
 | [`skills/arena-offload`](skills/arena-offload/SKILL.md) | Arena: одна выбранная модель; переписка может стать публичной, поэтому только для задач с публичными данными |
 | [`skills/cerebras-offload`](skills/cerebras-offload/SKILL.md) | Cerebras (Qwen, GPT OSS) |
-| [`skills/copilot-offload`](skills/copilot-offload/SKILL.md) | Microsoft Copilot: **пока не работает** (запрос не отправляется) |
+| [`skills/copilot-offload`](skills/copilot-offload/SKILL.md) | Microsoft Copilot — **не используется**: капча (решение владельца 04-11-2026). **пока не работает** (запрос не отправляется) |
 
 Qwen, Z.ai, Arena и Cerebras проверены настоящим запросом 2026-11-03: роутер на Claude Haiku, тексты скиллов написала Gemini через `aistudio-offload`. Вывод из проверок: текст в поле ввода надо печатать (`computer` type), а не подставлять через `form_input`. Подстановка не даёт событий клавиатуры, и Z.ai и Copilot отвечают на неё капчей.
 
